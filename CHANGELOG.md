@@ -65,8 +65,32 @@ First release. Everything below is new.
   `inspect --fail-on <severity>` for use as a CI gate.
 - Seeded synthetic stand generator providing ground truth for the test suite
   and for `silvispect demo`.
-- 213 tests, ruff lint and format configuration, GitHub Actions CI across
+- 227 tests, ruff lint and format configuration, GitHub Actions CI across
   Python 3.10–3.13, and a committed sample plot whose reproducibility CI
   verifies.
+- PEP 561 `py.typed` marker, and a source distribution that carries the test
+  fixtures the shipped tests need.
+
+### Corrections before release
+
+An independent review of the first pushed commit found five behavioural
+defects, all fixed here with regression tests:
+
+- Volume and biomass totals reported `0` for a stand with diameters but no
+  heights. They are now absent, and `yield_basis_count` exposes how many stems
+  the totals actually rest on.
+- `inspect --no-detection` invented a zero-tree "detected" stand and raised
+  SV001, failing a `--fail-on warning` gate for a stand nobody had counted.
+  Metrics now report `metrics_source: none` and the stem-based rules stay quiet.
+- A raster with no canopy at all produced an infinite gap width, which is not
+  representable in JSON. With no canopy to measure from, distances are now
+  measured from the plot edge.
+- A malformed threshold profile (a JSON `null`, a list value, an out-of-range
+  or self-contradictory threshold) surfaced as a traceback. Profiles are now
+  validated on load and rejected with exit status `2`.
+- The synthetic generator drew stems across the *requested* extent while
+  rendering the *rounded* raster, so a non-divisible extent returned ground-truth
+  trees that were never rendered. Stems are now drawn inside the realised
+  raster.
 
 [0.1.0]: https://github.com/karine-mue/Silvispect/releases/tag/v0.1.0

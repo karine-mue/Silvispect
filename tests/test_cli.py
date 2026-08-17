@@ -185,7 +185,9 @@ def test_inspect_fail_on_severity(workspace):
 
 def test_inspect_with_a_config_file(workspace, tmp_path):
     config = tmp_path / "thresholds.json"
-    config.write_text(json.dumps({"min_stems_per_ha": 100000.0}), encoding="utf-8")
+    # Above the sample plot's 340 stems/ha, but still under the default
+    # maximum, so the profile stays internally consistent.
+    config.write_text(json.dumps({"min_stems_per_ha": 500.0}), encoding="utf-8")
     code, text = run(
         "inspect",
         "--inventory",

@@ -1,0 +1,8 @@
+# The source distribution ships the tests and the fixtures they need, so a
+# downstream packager can actually run the suite from an unpacked sdist.
+include LICENSE README.md CHANGELOG.md CONTRIBUTING.md Makefile MANIFEST.in
+include silvispect/py.typed
+recursive-include tests *.py
+recursive-include data *.asc *.csv *.json
+recursive-include docs *.md
+include scripts/make_sample_data.py

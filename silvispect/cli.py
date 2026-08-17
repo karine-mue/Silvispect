@@ -349,7 +349,7 @@ def main(argv: Sequence[str] | None = None, *, out=None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args, out)
-    except (GridError, InventoryError, AllometryError, ValueError) as exc:
+    except (GridError, InventoryError, AllometryError, ValueError, TypeError) as exc:
         print(f"silvispect: {exc}", file=sys.stderr)
         return EXIT_ERROR
     except FileNotFoundError as exc:

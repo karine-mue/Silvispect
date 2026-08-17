@@ -155,14 +155,14 @@ def render_markdown(
     parts: list[str] = [f"# {title}", ""]
     parts.append(
         f"Inspected **{metrics.tree_count} trees** over **{report.area_ha:.3f} ha** "
-        f"using {report.metrics_source} data. "
+        f"using {_source_label(report.metrics_source)}. "
         f"Highest severity: **{report.max_severity.label}** "
         f"({len(report.findings)} findings: "
         + ", ".join(f"{count} {name}" for name, count in counts.items() if count)
         + ")."
         if report.findings
         else f"Inspected **{metrics.tree_count} trees** over "
-        f"**{report.area_ha:.3f} ha** using {report.metrics_source} data. "
+        f"**{report.area_ha:.3f} ha** using {_source_label(report.metrics_source)}. "
         "No findings."
     )
     parts.append("")
@@ -355,7 +355,7 @@ def render_text(report: InspectionReport) -> str:
     lines = [
         "Silvispect inspection",
         "=" * 21,
-        f"area              {report.area_ha:.3f} ha ({report.metrics_source} data)",
+        f"area              {report.area_ha:.3f} ha ({_source_label(report.metrics_source)})",
         f"trees             {metrics.tree_count}",
         f"stems/ha          {metrics.stems_per_ha:.0f}",
         f"basal area/ha     {_fmt(metrics.basal_area_per_ha)} m2",
@@ -394,6 +394,11 @@ def render_json(report: InspectionReport, *, indent: int = 2) -> str:
     producing a document a consumer cannot read.
     """
     return json.dumps(report.as_dict(), indent=indent, sort_keys=False, allow_nan=False) + "\n"
+
+
+def _source_label(source: str) -> str:
+    """Phrase the metrics source for a human reader."""
+    return "no stem data" if source == "none" else f"{source} data"
 
 
 def _fmt(value: object) -> str:

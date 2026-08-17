@@ -202,6 +202,11 @@ classic way an inventory summary becomes quietly wrong.
 Volume and biomass are order-of-magnitude tools. Anyone needing merchantable
 volume should substitute a regional taper equation.
 
+Both need a height as well as a diameter, so they are computed over a subset of
+the measured stems. That subset is reported as `yield_basis_count`, and the
+totals are absent rather than zero when it is empty: a stand with diameters but
+no heights has an unknown volume, and reporting `0` would be a fabrication.
+
 ## 7. Synthetic stands
 
 The detector is tested against ground truth, which requires a stand whose trees
@@ -215,6 +220,12 @@ are known exactly. `silvispect.synth` generates one from a seed:
    maximum, with crown radius scaled to height.
 6. Add per-cell measurement noise, lay the canopy over a sloped and undulating
    terrain model, and subtract to obtain the CHM.
+
+A raster holds a whole number of cells, so a requested extent that is not a
+multiple of the cell size is rounded; stems are then drawn inside the *realised*
+extent, and `SyntheticStand.area_ha` reports the raster's own area. That keeps
+the guarantee the generator exists for: the returned trees are exactly the stems
+rendered into the canopy model.
 
 The same seed always produces the same stand, byte for byte, which is what
 makes the accuracy assertions in the test suite meaningful rather than

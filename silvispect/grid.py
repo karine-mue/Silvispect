@@ -247,6 +247,7 @@ class Grid:
 
     def neighbors(self, row: int, col: int, connectivity: int = 8) -> Iterator[Cell]:
         """Yield in-bounds neighbours using 4- or 8-connectivity."""
+        offsets: tuple[tuple[int, int], ...]
         if connectivity == 4:
             offsets = ((-1, 0), (1, 0), (0, -1), (0, 1))
         elif connectivity == 8:

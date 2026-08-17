@@ -81,8 +81,30 @@ class SynthConfig:
             raise ValueError("stems_per_ha must be non-negative")
 
     @property
+    def shape(self) -> tuple[int, int]:
+        """Raster dimensions in cells as ``(nrows, ncols)``."""
+        return (
+            max(1, round(self.height / self.cellsize)),
+            max(1, round(self.width / self.cellsize)),
+        )
+
+    @property
+    def extent(self) -> tuple[float, float]:
+        """Realised ``(width, height)`` in metres, rounded to whole cells.
+
+        A raster holds a whole number of cells, so a requested extent that is
+        not a multiple of the cell size is rounded.  Stems are drawn inside
+        *this* extent rather than the requested one, so that every generated
+        tree is actually rendered into the canopy model.
+        """
+        nrows, ncols = self.shape
+        return (ncols * self.cellsize, nrows * self.cellsize)
+
+    @property
     def area_ha(self) -> float:
-        return self.width * self.height / 10_000.0
+        """Ground area of the raster that will be generated, in hectares."""
+        width, height = self.extent
+        return width * height / 10_000.0
 
 
 @dataclass
@@ -98,7 +120,8 @@ class SyntheticStand:
 
     @property
     def area_ha(self) -> float:
-        return self.config.area_ha
+        """Ground area of the generated raster, in hectares."""
+        return self.chm.area_ha
 
 
 def synthesize(config: SynthConfig | None = None, **overrides) -> SyntheticStand:
@@ -118,8 +141,7 @@ def synthesize(config: SynthConfig | None = None, **overrides) -> SyntheticStand
         config = SynthConfig(**{**config.__dict__, **overrides})
 
     rng = random.Random(config.seed)
-    ncols = max(1, round(config.width / config.cellsize))
-    nrows = max(1, round(config.height / config.cellsize))
+    nrows, ncols = config.shape
 
     dtm = Grid.filled(
         nrows,
@@ -166,10 +188,11 @@ def synthesize(config: SynthConfig | None = None, **overrides) -> SyntheticStand
 def _draw_gaps(rng: random.Random, config: SynthConfig) -> list[tuple[float, float, float]]:
     gaps: list[tuple[float, float, float]] = []
     low, high = config.gap_radius
+    width, height = config.extent
     for _ in range(max(0, config.gap_count)):
         radius = rng.uniform(low, high)
-        x = config.xllcorner + rng.uniform(radius, max(radius, config.width - radius))
-        y = config.yllcorner + rng.uniform(radius, max(radius, config.height - radius))
+        x = config.xllcorner + rng.uniform(radius, max(radius, width - radius))
+        y = config.yllcorner + rng.uniform(radius, max(radius, height - radius))
         gaps.append((x, y, radius))
     return gaps
 
@@ -183,13 +206,14 @@ def _draw_positions(
     if target <= 0:
         return []
     spacing = 0.62 * math.sqrt(10_000.0 / max(config.stems_per_ha, 1.0))
+    width, height = config.extent
     accepted: list[tuple[float, float]] = []
     attempts = 0
     max_attempts = target * 80
     while len(accepted) < target and attempts < max_attempts:
         attempts += 1
-        x = config.xllcorner + rng.uniform(0.0, config.width)
-        y = config.yllcorner + rng.uniform(0.0, config.height)
+        x = config.xllcorner + rng.uniform(0.0, width)
+        y = config.yllcorner + rng.uniform(0.0, height)
         if any(math.hypot(x - gx, y - gy) < gr for gx, gy, gr in gaps):
             continue
         if any(math.hypot(x - ax, y - ay) < spacing for ax, ay in accepted):

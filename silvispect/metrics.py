@@ -67,10 +67,10 @@ def basal_area(trees: Sequence[Tree]) -> float:
 
 def quadratic_mean_diameter(trees: Sequence[Tree]) -> float | None:
     """Diameter of the tree of mean basal area, in centimetres."""
-    diameters = [tree.dbh_cm for tree in _measured(trees)]
+    diameters = [tree.dbh_cm for tree in _measured(trees) if tree.dbh_cm is not None]
     if not diameters:
         return None
-    return math.sqrt(sum(d * d for d in diameters) / len(diameters))  # type: ignore[operator]
+    return math.sqrt(sum(d * d for d in diameters) / len(diameters))
 
 
 def lorey_height(trees: Sequence[Tree]) -> float | None:
@@ -202,6 +202,9 @@ class StandMetrics:
     area_ha: float
     tree_count: int
     measured_count: int
+    #: Stems carrying both a diameter and a height, the basis of the volume and
+    #: biomass totals.  Lower than ``measured_count`` when heights are missing.
+    yield_basis_count: int
     stems_per_ha: float
     basal_area_per_ha: float | None
     quadratic_mean_diameter_cm: float | None
@@ -224,6 +227,7 @@ class StandMetrics:
             "area_ha": round(self.area_ha, 4),
             "tree_count": self.tree_count,
             "measured_count": self.measured_count,
+            "yield_basis_count": self.yield_basis_count,
             "stems_per_ha": round(self.stems_per_ha, 2),
             "basal_area_per_ha_m2": _round(self.basal_area_per_ha, 3),
             "qmd_cm": _round(self.quadratic_mean_diameter_cm, 2),
@@ -273,10 +277,20 @@ def stand_metrics(
     qmd = quadratic_mean_diameter(measured)
     stems_ha = len(selected) / area_ha
 
-    volumes = [stem_volume(tree, form_factor=form_factor) for tree in measured]
-    volume_total = sum(v for v in volumes if v is not None)
-    biomasses = [above_ground_biomass(tree) for tree in measured]
-    biomass_total = sum(b for b in biomasses if b is not None)
+    # Volume and biomass both need a height as well as a diameter, so they are
+    # computed over a subset of the measured stems.  That subset is reported as
+    # `yield_basis_count` and the totals stay None when it is empty: a stand
+    # with diameters but no heights has an *unknown* volume, not a zero one.
+    volumes = [
+        volume
+        for volume in (stem_volume(tree, form_factor=form_factor) for tree in measured)
+        if volume is not None
+    ]
+    biomasses = [
+        biomass
+        for biomass in (above_ground_biomass(tree) for tree in measured)
+        if biomass is not None
+    ]
 
     return StandMetrics(
         area_ha=area_ha,
@@ -294,8 +308,9 @@ def stand_metrics(
         gini_basal_area=gini_coefficient([tree.basal_area_m2 or 0.0 for tree in measured]),
         shannon=shannon_index(selected),
         simpson=simpson_index(selected),
-        volume_per_ha_m3=volume_total / area_ha if measured else None,
-        biomass_per_ha_t=(biomass_total / 1000.0) / area_ha if measured else None,
+        yield_basis_count=len(volumes),
+        volume_per_ha_m3=sum(volumes) / area_ha if volumes else None,
+        biomass_per_ha_t=(sum(biomasses) / 1000.0) / area_ha if biomasses else None,
         species_shares=species_composition(selected),
         diameter_classes=diameter_distribution(measured, class_width=class_width),
     )

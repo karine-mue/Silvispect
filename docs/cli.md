@@ -36,7 +36,7 @@ $ silvispect inspect [--chm CHM] [--inventory CSV] [--area-ha HA]
 | `--area-ha` | Raster footprint | Required when no raster is given |
 | `--config` | Built-in defaults | JSON threshold overrides; unknown keys are rejected |
 | `--format` | `text` | `markdown` for a full report, `json` for machines |
-| `--no-detection` | off | Skip tree detection; canopy and gap rules still run |
+| `--no-detection` | off | Skip tree detection. Canopy and gap rules still run; the stem-based rules stay silent because nothing counted stems |
 | `--with-map` | off | Append an ASCII canopy map |
 | `--fail-on` | `none` | Exit `1` when a finding reaches this severity |
 

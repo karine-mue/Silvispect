@@ -145,18 +145,43 @@ def _chamfer(chm: Grid, seeds: Iterable[int], *, ceiling: float | None = None) -
     return distances
 
 
+def _distance_to_outside(chm: Grid) -> list[float]:
+    """Distance from each cell centre to just beyond the nearest grid edge."""
+    half = chm.cellsize / 2.0
+    return [
+        min(col, chm.ncols - 1 - col, row, chm.nrows - 1 - row) * chm.cellsize + half
+        for row in range(chm.nrows)
+        for col in range(chm.ncols)
+    ]
+
+
+def _canopy_distance_field(chm: Grid, threshold: float) -> list[float]:
+    """Distance from every cell to the nearest canopy cell, in map units.
+
+    When the raster holds no canopy at all there is no source to measure from,
+    and an unbounded search would give every cell an infinite distance — which
+    a gap would then report as an infinite width, and JSON cannot represent.
+    The plot edge is the only boundary such a stand has, so distances are
+    measured from outside the grid instead: finite, and true to what is known.
+    """
+    seeds = [
+        position for position, value in enumerate(chm.values) if value is None or value >= threshold
+    ]
+    if not seeds:
+        return _distance_to_outside(chm)
+    return _chamfer(chm, seeds)
+
+
 def distance_to_canopy(chm: Grid, *, threshold: float = 2.0) -> Grid:
     """Distance from every cell to the nearest canopy cell, in map units.
 
     Cells at or above ``threshold`` are the sources and get distance zero.
     Cells with no data are treated as unknown rather than as openings, so they
-    are sources too.
+    are sources too.  A raster with no canopy anywhere measures from the plot
+    edge instead — see :func:`_canopy_distance_field`.
     """
-    seeds = [
-        position for position, value in enumerate(chm.values) if value is None or value >= threshold
-    ]
     out = chm.like()
-    for position, distance in enumerate(_chamfer(chm, seeds)):
+    for position, distance in enumerate(_canopy_distance_field(chm, threshold)):
         out.values[position] = None if math.isinf(distance) else distance
     return out
 
@@ -173,14 +198,7 @@ def _opened_gap_mask(chm: Grid, threshold: float, radius: float) -> tuple[list[b
     Returns:
         The opened mask and the distance-to-canopy values behind it.
     """
-    to_canopy = _chamfer(
-        chm,
-        [
-            position
-            for position, value in enumerate(chm.values)
-            if value is None or value >= threshold
-        ],
-    )
+    to_canopy = _canopy_distance_field(chm, threshold)
     eroded = [position for position, distance in enumerate(to_canopy) if distance > radius]
     mask = [False] * len(chm.values)
     if not eroded:
@@ -234,14 +252,7 @@ def find_gaps(
         mask, to_canopy = _opened_gap_mask(chm, threshold, min_width / 2.0)
     else:
         mask = [value is not None and value < threshold for value in chm.values]
-        to_canopy = _chamfer(
-            chm,
-            [
-                position
-                for position, value in enumerate(chm.values)
-                if value is None or value >= threshold
-            ],
-        )
+        to_canopy = _canopy_distance_field(chm, threshold)
 
     seen = [False] * len(chm.values)
     gaps: list[CanopyGap] = []

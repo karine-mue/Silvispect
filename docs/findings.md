@@ -24,6 +24,7 @@ error:
 | Input supplied | Rules that run |
 | --- | --- |
 | Canopy model only | Stocking (from detections), canopy, gaps, structure |
+| Canopy model with `--no-detection` | Canopy and gaps only |
 | Inventory only | Stocking, structure, composition, all data-quality rules |
 | Both | Everything, including detection agreement |
 
@@ -31,6 +32,12 @@ With a canopy model alone, stem metrics come from the detected crowns with
 diameters back-calculated from a default height-diameter curve; the report
 labels this `metrics_source: detected` so the numbers are never mistaken for
 measurements.
+
+`--no-detection` leaves no stem information at all. The report then says
+`metrics_source: none` and the stem-based rules (SV001–SV004, SV020) stay
+silent: a stand nobody counted has *unknown* stocking, not zero stocking. A
+detector that did run and found nothing is a different matter — that is
+evidence of an empty stand, and SV001 fires.
 
 ---
 
@@ -180,9 +187,18 @@ from JSON:
 $ silvispect inspect --chm chm.asc --inventory trees.csv --config profile.json
 ```
 
-Unknown keys are rejected rather than ignored, so a typo in a profile fails
-loudly instead of silently leaving a default in place. A worked example ships
-as [`data/thresholds-strict.json`](../data/thresholds-strict.json).
+A profile is validated when it loads, and anything unusable is rejected with
+exit status `2` rather than surfacing later as a traceback:
+
+- unknown keys, so a typo fails loudly instead of leaving a default in place;
+- non-numeric or non-object payloads;
+- negative thresholds, and proportions outside `[0, 1]`;
+- `min_allometry_points` below 1;
+- contradictory pairs such as `min_stems_per_ha` above `max_stems_per_ha`,
+  which no stand could ever satisfy.
+
+A worked example ships as
+[`data/thresholds-strict.json`](../data/thresholds-strict.json).
 
 The defaults are plausible for a temperate managed forest and wrong for
 anything else. They are a starting point for your own silvicultural

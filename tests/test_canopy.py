@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from silvispect.canopy import (
     canopy_cover,
     canopy_height_model,
+    distance_to_canopy,
     find_gaps,
     gap_fraction,
     rugosity,
@@ -120,3 +123,28 @@ def test_synthetic_stand_has_realistic_cover(stand):
     cover = canopy_cover(stand.chm, 2.0)
     assert 0.4 < cover < 1.0
     assert stand.chm.stats().maximum > 15.0
+
+
+def test_distance_to_canopy_is_zero_at_canopy_cells():
+    rows = [[10.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    distances = distance_to_canopy(Grid.from_rows(rows, cellsize=1.0), threshold=2.0)
+    assert distances.get(0, 0) == 0.0
+    assert distances.get(0, 1) == pytest.approx(1.0)
+    assert distances.get(1, 1) == pytest.approx(math.sqrt(2.0))
+
+
+def test_treeless_raster_reports_a_finite_gap_width():
+    """With no canopy anywhere the plot edge is the only boundary there is."""
+    chm = Grid.filled(10, 10, 0.0, cellsize=1.0)
+    gaps = find_gaps(chm, threshold=2.0, min_area=1.0, min_width=5.0)
+    assert len(gaps) == 1
+    assert math.isfinite(gaps[0].width)
+    # The largest circle inside a 10 m x 10 m opening has a 10 m diameter; the
+    # chamfer transform measures from cell centres, so it lands just under.
+    assert 8.0 <= gaps[0].width <= 10.0
+    assert math.isfinite(gaps[0].as_dict()["width_m"])
+
+
+def test_treeless_raster_distance_field_is_finite():
+    distances = distance_to_canopy(Grid.filled(6, 6, 0.0, cellsize=1.0), threshold=2.0)
+    assert all(value is not None and math.isfinite(value) for value in distances.values)

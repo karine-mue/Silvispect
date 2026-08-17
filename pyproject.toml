@@ -47,6 +47,10 @@ dev = ["pytest>=7", "ruff>=0.16.3,<0.17"]
 [tool.setuptools]
 packages = ["silvispect"]
 
+[tool.setuptools.package-data]
+# PEP 561 marker: the package ships inline type annotations.
+silvispect = ["py.typed"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

@@ -114,3 +114,30 @@ def test_georeferencing_is_honoured():
     )
     assert stand.chm.extent[0] == pytest.approx(500_000.0)
     assert all(tree.x >= 500_000.0 for tree in stand.trees)
+
+
+def test_extent_rounds_to_whole_cells():
+    config = SynthConfig(width=14.0, height=100.0, cellsize=10.0)
+    assert config.shape == (10, 1)
+    assert config.extent == (10.0, 100.0)
+    assert config.area_ha == pytest.approx(0.1)
+
+
+def test_every_generated_tree_is_inside_the_raster():
+    """The returned trees are exactly the stems rendered into the CHM."""
+    stand = synthesize(
+        SynthConfig(
+            width=14.0, height=100.0, cellsize=10.0, stems_per_ha=300.0, seed=4, gap_count=0
+        )
+    )
+    xmin, ymin, xmax, ymax = stand.chm.extent
+    assert stand.trees
+    for tree in stand.trees:
+        assert xmin <= tree.x <= xmax
+        assert ymin <= tree.y <= ymax
+    assert stand.area_ha == pytest.approx(stand.chm.area_ha)
+
+
+def test_reported_area_follows_the_raster_not_the_request():
+    stand = synthesize(SynthConfig(width=14.0, height=100.0, cellsize=10.0, seed=1))
+    assert stand.area_ha == pytest.approx(0.1)

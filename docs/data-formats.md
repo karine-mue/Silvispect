@@ -147,8 +147,10 @@ given; the rest keep their defaults.
 }
 ```
 
-Unknown keys raise an error rather than being ignored, so a typo fails loudly
-instead of quietly leaving a default in place. See
+Unknown keys, non-numeric values, negative thresholds, proportions outside
+`[0, 1]` and self-contradictory pairs are all rejected when the profile loads,
+so a broken profile fails loudly instead of quietly leaving a default in place.
+See
 [`data/thresholds-strict.json`](../data/thresholds-strict.json) for a complete
 profile and [`findings.md`](findings.md) for what each threshold controls.
 
@@ -159,9 +161,10 @@ profile and [`findings.md`](findings.md) for what each threshold controls.
 ```jsonc
 {
   "area_ha": 0.25,
-  "metrics_source": "field",          // or "detected"
+  "metrics_source": "field",          // "detected", or "none" when nothing counted stems
   "summary": { "finding_count": 2, "max_severity": "notice", "counts": {...} },
-  "metrics": { "stems_per_ha": 340.0, "basal_area_per_ha_m2": 25.11, ... },
+  "metrics": { "stems_per_ha": 340.0, "basal_area_per_ha_m2": 25.11,
+               "yield_basis_count": 85, ... },
   "canopy": { "cover": 0.636, "rugosity_m": 4.2, "strata": {...}, ... },
   "findings": [ { "code": "SV012", "severity": "notice", "title": ..., ... } ],
   "detection": { "tree_count": 84, "trees": [...] },
@@ -174,4 +177,9 @@ profile and [`findings.md`](findings.md) for what each threshold controls.
 
 `detection`, `match`, `allometry` and `gaps` are present only when the
 corresponding input was supplied. The output is strict JSON: absent statistics
-are `null`, never `NaN`, so any parser can read it.
+are `null`, never `NaN` or `Infinity`, so any parser can read it.
+
+`yield_basis_count` is the number of stems behind `volume_per_ha_m3` and
+`biomass_per_ha_t`. Both need a height as well as a diameter, so the totals
+cover a subset of `measured_count` and are `null` when that subset is empty —
+a stand with diameters but no heights has an unknown volume, not a zero one.

@@ -119,18 +119,51 @@ class InspectionConfig:
     match_tolerance_m: float = 2.50
     min_allometry_points: int = 8
 
+    #: Fields constrained to a proportion in [0, 1].
+    _FRACTIONS = (
+        "min_canopy_cover",
+        "max_gap_fraction",
+        "min_recall",
+        "min_precision",
+        "max_species_share",
+    )
+
+    def __post_init__(self) -> None:
+        """Reject configurations that would make a rule meaningless or crash.
+
+        A profile is user input, so it is validated at the boundary rather than
+        being allowed to surface later as a traceback from deep inside a fit.
+        """
+        if self.min_allometry_points < 1:
+            raise ValueError("min_allometry_points must be at least 1")
+        for name in self._FRACTIONS:
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be a proportion between 0 and 1, got {value}")
+        for name, value in asdict(self).items():
+            if isinstance(value, (int, float)) and value < 0:
+                raise ValueError(f"{name} must not be negative, got {value}")
+        for low, high in (
+            ("min_stems_per_ha", "max_stems_per_ha"),
+            ("min_sdi", "max_sdi"),
+        ):
+            if getattr(self, low) > getattr(self, high):
+                raise ValueError(f"{low} must not exceed {high}")
+
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> InspectionConfig:
+        if not isinstance(data, dict):
+            raise ValueError(f"configuration must be a JSON object, got {type(data).__name__}")
         known = {f.name for f in fields(cls)}
         unknown = set(data) - known
         if unknown:
             raise ValueError(f"unknown configuration keys: {sorted(unknown)}")
-        return cls(
-            **{
-                key: float(value) if key != "min_allometry_points" else int(value)  # type: ignore[arg-type]
-                for key, value in data.items()
-            }
-        )
+        converted: dict[str, float | int] = {}
+        for key, value in data.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise ValueError(f"{key} must be a number, got {type(value).__name__}")
+            converted[key] = int(value) if key == "min_allometry_points" else float(value)
+        return cls(**converted)  # type: ignore[arg-type]
 
     @classmethod
     def load(cls, path: str | Path) -> InspectionConfig:
@@ -167,6 +200,16 @@ class InspectionContext:
         return bool(self.field_trees)
 
     @property
+    def has_stem_source(self) -> bool:
+        """Whether any process actually looked for stems.
+
+        False when detection was skipped and no inventory was supplied: the
+        stand then has *unknown* stocking, not zero stocking, so the stem-based
+        rules must stay quiet instead of reporting an empty forest.
+        """
+        return self.detection is not None or self.has_field_data
+
+    @property
     def has_raster(self) -> bool:
         return self.chm is not None
 
@@ -189,6 +232,8 @@ def rule(fn: Rule) -> Rule:
 @rule
 def check_stocking(ctx: InspectionContext) -> Iterable[Finding]:
     """SV001/SV002 — stem density outside the acceptable band."""
+    if not ctx.has_stem_source:
+        return
     density = ctx.metrics.stems_per_ha
     cfg = ctx.config
     if density < cfg.min_stems_per_ha:
@@ -217,6 +262,8 @@ def check_stocking(ctx: InspectionContext) -> Iterable[Finding]:
 @rule
 def check_density_index(ctx: InspectionContext) -> Iterable[Finding]:
     """SV003/SV004 — Reineke stand density index outside the managed range."""
+    if not ctx.has_stem_source:
+        return
     sdi = ctx.metrics.sdi
     if sdi is None:
         return
@@ -310,6 +357,8 @@ def check_gap_fraction(ctx: InspectionContext) -> Iterable[Finding]:
 @rule
 def check_structural_diversity(ctx: InspectionContext) -> Iterable[Finding]:
     """SV020 — size distribution is nearly uniform."""
+    if not ctx.has_stem_source:
+        return
     gini = ctx.metrics.gini_basal_area
     if gini is None:
         return
@@ -683,9 +732,14 @@ def inspect_stand(
     if field_trees:
         analysis_trees = field_trees
         source = "field"
-    else:
-        analysis_trees = trees_from_crowns(detection.crowns if detection else [], dbh_model=model)
+    elif detection is not None:
+        analysis_trees = trees_from_crowns(detection.crowns, dbh_model=model)
         source = "detected"
+    else:
+        # Only a raster, with detection switched off: there is no stem
+        # information at all, and the metrics below describe an empty list.
+        analysis_trees = []
+        source = "none"
 
     metrics = stand_metrics(analysis_trees, area_ha)
     match: MatchResult | None = None

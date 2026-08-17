@@ -171,3 +171,22 @@ def test_metrics_of_a_synthetic_stand_are_realistic(stand):
     assert metrics.dominant_height_m >= metrics.mean_height_m
     assert 0 < metrics.gini_basal_area < 1
     assert metrics.volume_per_ha_m3 > 0
+
+
+def test_yield_totals_are_unknown_not_zero_without_heights():
+    """A stand with diameters but no heights has an unknown volume, not zero."""
+    metrics = stand_metrics([tree("a", 30.0, None)], area_ha=1.0)
+    assert metrics.measured_count == 1
+    assert metrics.yield_basis_count == 0
+    assert metrics.volume_per_ha_m3 is None
+    assert metrics.biomass_per_ha_t is None
+
+
+def test_yield_basis_count_exposes_the_partial_subset():
+    """Totals cover only the stems with both dimensions, and say so."""
+    trees = [tree("a", 30.0, 22.0), tree("b", 30.0, None)]
+    metrics = stand_metrics(trees, area_ha=1.0)
+    assert metrics.measured_count == 2
+    assert metrics.yield_basis_count == 1
+    assert metrics.volume_per_ha_m3 == pytest.approx(stem_volume(trees[0]))
+    assert metrics.as_dict()["yield_basis_count"] == 1

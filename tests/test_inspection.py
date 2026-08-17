@@ -313,3 +313,55 @@ def test_inspection_accepts_a_derived_canopy_model(stand):
     report = inspect_stand(chm=chm, run_detection=False)
     assert report.canopy["cover"] > 0.0
     assert report.detection is None
+
+
+# ----------------------------------------------------------------------
+# absent inputs must stay absent, not become zero
+# ----------------------------------------------------------------------
+def test_skipping_detection_does_not_invent_an_empty_stand():
+    """No detection and no inventory means unknown stocking, not zero stocking."""
+    report = inspect_stand(chm=flat_canopy(), run_detection=False)
+    assert report.metrics_source == "none"
+    assert report.detection is None
+    # Stem-based rules have no stem source and must stay quiet.
+    assert {"SV001", "SV002", "SV003", "SV004", "SV020"} & codes(report) == set()
+
+
+def test_detection_that_finds_nothing_still_reports_understocking():
+    """A detector that ran and found nothing IS evidence of an empty stand."""
+    report = inspect_stand(chm=flat_canopy(0.0), run_detection=True)
+    assert report.metrics_source == "detected"
+    assert report.detection["tree_count"] == 0
+    assert "SV001" in codes(report)
+
+
+def test_config_rejects_a_non_object_payload():
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        InspectionConfig.from_dict(None)  # type: ignore[arg-type]
+
+
+def test_config_rejects_non_numeric_values():
+    with pytest.raises(ValueError, match="must be a number"):
+        InspectionConfig.from_dict({"min_sdi": [1, 2]})
+    with pytest.raises(ValueError, match="must be a number"):
+        InspectionConfig.from_dict({"min_sdi": True})
+
+
+def test_config_rejects_out_of_range_values():
+    with pytest.raises(ValueError, match="min_allometry_points"):
+        InspectionConfig(min_allometry_points=0)
+    with pytest.raises(ValueError, match="proportion between 0 and 1"):
+        InspectionConfig(min_canopy_cover=1.5)
+    with pytest.raises(ValueError, match="must not be negative"):
+        InspectionConfig(max_gap_area=-1.0)
+    with pytest.raises(ValueError, match="must not exceed"):
+        InspectionConfig(min_stems_per_ha=900.0, max_stems_per_ha=100.0)
+
+
+def test_inspection_survives_an_inventory_without_heights():
+    """Diameters with no heights must not divide by zero during fitting."""
+    trees = [Tree(f"t{i}", i, i, species="PIAB", dbh_cm=30.0) for i in range(20)]
+    report = inspect_stand(trees=trees, area_ha=0.05)
+    assert report.allometry["fitted"] is False
+    assert report.metrics.volume_per_ha_m3 is None
+    assert "SV040" in codes(report)

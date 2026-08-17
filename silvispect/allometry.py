@@ -235,7 +235,11 @@ def fit_height_diameter(
     spec = MODELS.get(model)
     if spec is None:
         raise AllometryError(f"unknown model {model!r}; choose from {sorted(MODELS)}")
+    if min_points < 1:
+        raise AllometryError("min_points must be at least 1")
     pairs = _as_pairs(data)
+    if not pairs:
+        raise AllometryError("no paired diameter and height measurements to fit")
     if len(pairs) < min_points:
         raise AllometryError(f"need at least {min_points} paired measurements, got {len(pairs)}")
 
@@ -312,6 +316,7 @@ def default_model(species: str = "", *, model: str = DEFAULT_MODEL) -> FittedMod
     if spec is None:
         raise AllometryError(f"unknown model {model!r}")
     code = species.strip().upper()
+    params: tuple[float, ...]
     if model == DEFAULT_MODEL:
         params = SPECIES_DEFAULTS.get(code, SPECIES_DEFAULTS[""])
     else:
@@ -340,7 +345,11 @@ def residual_scores(model: FittedModel, trees: Sequence[Tree]) -> list[tuple[Tre
     ]
     if not usable:
         return []
-    residuals = [tree.height_m - model.predict(tree.dbh_cm) for tree in usable]  # type: ignore[arg-type]
+    residuals = [
+        tree.height_m - model.predict(tree.dbh_cm)
+        for tree in usable
+        if tree.height_m is not None and tree.dbh_cm is not None
+    ]
     n = len(residuals)
     mean = sum(residuals) / n
     if n > 1:

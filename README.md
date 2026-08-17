@@ -238,7 +238,7 @@ in [`docs/data-formats.md`](docs/data-formats.md).
 
 ```console
 $ pip install -e ".[dev]"
-$ pytest              # 213 tests
+$ pytest              # 227 tests
 $ ruff check .
 $ ruff format --check .
 ```
