@@ -24,3 +24,5 @@ htmlcov/
 /stand/
 /out/
 *.report.md
+# Rasters at the repo root are scratch; the committed samples live in data/
+/*.asc
