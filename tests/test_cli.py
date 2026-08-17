@@ -256,19 +256,59 @@ def test_malformed_inventory_is_reported(tmp_path):
     assert code == EXIT_ERROR
 
 
-def test_chm_command_preserves_sub_millimetre_differences(tmp_path):
-    """Rounding near-equal heights together creates plateaus that move apexes."""
-    header = "ncols 6\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n"
-    (tmp_path / "dsm.asc").write_text(header + "20.0004 20.00049 19 18 17 21\n", encoding="utf-8")
-    (tmp_path / "dtm.asc").write_text(header + "0 0 0 0 0 0\n", encoding="utf-8")
+HEADER = "ncols 6\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n"
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "20.0004 20.00049 19 18 17 21",  # sub-millimetre
+        "20.0000004 20.00000049 19 18 17 21",  # sub-micrometre
+        "20.000000000004 20.0000000000049 19 18 17 21",  # sub-picometre
+        "3020.4 3020.49 3019 3018 3017 3021",  # a kilometre above the datum
+    ],
+)
+def test_chm_command_writes_the_model_the_analysis_would_have_used(tmp_path, surface):
+    """A derived model must analyse as the model it was derived from.
+
+    Writing a fixed number of decimals merges heights that differ below the
+    last one into a plateau, and a plateau has no apex, so the detector reports
+    something different from the same analysis on the unrounded surface.
+    Raising the fixed precision does not fix that — it only moves the magnitude
+    at which it happens, which is why this is checked across four of them.  The
+    file has to round-trip instead.
+    """
+    (tmp_path / "dsm.asc").write_text(HEADER + surface + "\n", encoding="utf-8")
+    (tmp_path / "dtm.asc").write_text(HEADER + "0 0 0 0 0 0\n", encoding="utf-8")
     derived = tmp_path / "derived.asc"
     code, _ = run(
         "chm", "--dsm", tmp_path / "dsm.asc", "--dtm", tmp_path / "dtm.asc", "-o", derived
     )
     assert code == EXIT_OK
-    values = Grid.read(derived).values
-    assert values[0] != values[1], "distinct heights must not collapse into a plateau"
+
+    expected = [float(text) for text in surface.split()]
+    assert Grid.read(derived).values == expected, "the derived model is not the difference"
 
     _, direct = run("detect", tmp_path / "dsm.asc", "--smooth-radius", 0, "--json")
     _, through = run("detect", derived, "--smooth-radius", 0, "--json")
-    assert json.loads(direct)["tree_count"] == json.loads(through)["tree_count"]
+    assert json.loads(direct) == json.loads(through)
+
+
+def test_chm_precision_is_still_available_when_a_smaller_file_matters(tmp_path):
+    """Rounding stays on offer; it is just no longer the default."""
+    (tmp_path / "dsm.asc").write_text(HEADER + "20.0004 20.00049 19 18 17 21\n", encoding="utf-8")
+    (tmp_path / "dtm.asc").write_text(HEADER + "0 0 0 0 0 0\n", encoding="utf-8")
+    derived = tmp_path / "rounded.asc"
+    code, _ = run(
+        "chm",
+        "--dsm",
+        tmp_path / "dsm.asc",
+        "--dtm",
+        tmp_path / "dtm.asc",
+        "-o",
+        derived,
+        "--precision",
+        2,
+    )
+    assert code == EXIT_OK
+    assert Grid.read(derived).values[:2] == [20.0, 20.0]

@@ -84,14 +84,38 @@ enlarge a gap and raise a finding a looser setting did not. A threshold on a
 single scalar field cannot behave that way: a larger radius always selects a
 subset.
 
-Painting the field needs care too. Discs are painted largest-first, and one is
-skipped only when it is genuinely *contained* in a disc already painted —
-`|p − q| + r ≤ R`, not merely "something covered p's centre". Skipping on
-coverage alone drops discs that reach cells no other disc does, which left the
-field asymmetric: on a treeless 4 m × 4 m plot the four equal discs collapsed to
-the north-west 3×3 block, so reflecting the input changed the answer, and
-raising `canopy_threshold` — which can only admit *more* open ground — could
-lose cells.
+Painting the field needs care too. A disc is dropped only when it is genuinely
+*contained* in another — `|p − q| + r ≤ R`, not merely "something covered p's
+centre". Skipping on coverage alone drops discs that reach cells no other disc
+does, which left the field asymmetric: on a treeless 4 m × 4 m plot the four
+equal discs collapsed to the north-west 3×3 block, so reflecting the input
+changed the answer, and raising `canopy_threshold` — which can only admit *more*
+open ground — could lose cells.
+
+Containment is tested against the eight adjacent cells, reading the distance
+field alone: `d(q) ≥ d(p) + |p − q|` for a neighbour `q` means the disc at `p`
+is inside the disc at `q`. Because the test never consults the work done so
+far, it cannot depend on the order cells are visited in — the failure mode the
+coverage test had. On open ground it removes nearly every disc, since almost
+all of them sit on a chamfer-shortest path towards the boundary. What survives
+is painted largest-first, so the first disc to reach a cell settles it; already
+settled cells are stepped over through a per-row disjoint-set walk rather than
+rewritten. Painting the survivors cell by cell instead cost 8.6 s on a treeless
+384 × 384 raster where this costs 0.59 s, and the cost is now linear in the
+number of cells.
+
+One tolerance is unavoidable — the distance field accumulates step lengths, so
+exact comparisons against it need slack — and it is expressed as a fraction of
+the cell size rather than as a fixed number of metres. A fixed `1e-9` is
+invisible on a metre-wide cell and total on a nanometre-wide one, where it made
+the field lose its scale covariance and the width filter admit everything.
+
+The **connectivity** asked for is used consistently. Gaps are labelled with it,
+and edge contact — inherited from the untrimmed sub-canopy component, since the
+opening insets the mask away from the border — is judged on components built
+with the same connectivity. Using eight-connectivity there regardless let a
+diagonal contact carry the edge flag into an opening that four-connectivity had
+deliberately kept separate.
 
 Two consequences of "as mapped" are worth stating plainly. The **plot edge is a
 boundary** for the inscribed circle: nothing is known beyond the extent, so a
@@ -155,18 +179,30 @@ diameter, mean height, and maximum extent from the apex.
 
 ## 4. Matching detections to field trees
 
-`match_trees` pairs crowns with field stems greedily: all pairs within a
-tolerance radius are sorted by distance and accepted while both partners are
-still unpaired. This yields a stable one-to-one assignment without a full
-Hungarian solve, which the problem size does not justify.
+`match_trees` pairs crowns with field stems by distance: candidates within a
+tolerance radius are settled in ascending distance order, so a nearer pair is
+never given up to make room for a further one. This yields a stable one-to-one
+assignment without a full Hungarian solve, which the problem size does not
+justify.
 
-**Ties are settled by geometry, never by file order.** Equal distances are
-ranked by position and identifier, so shuffling the rows of an inventory cannot
-change the result. It could before: two crowns and two stems all exactly one
-metre apart matched one pair in one row order and two in the other, moving
-recall from 0.5 to 1.0 on identical geometry. Dominant height ranks the same way
-— diameter, then height, then identifier — so a tie at the 100-stems-per-hectare
-cutoff no longer depends on which stem was typed first.
+**Ties are settled by geometry alone.** Candidates at *equal* distance are
+resolved together, by a maximum bipartite matching restricted to that one
+distance. How many of them can be honoured is then a fact about the geometry,
+and nothing outside the geometry gets a vote.
+
+Two narrower rules were tried first and both failed, in the same way. Taking
+the earlier row made the answer depend on how the CSV happened to be written:
+two crowns and two stems all exactly one metre apart matched one pair in one row
+order and two in the other, moving recall from 0.5 to 1.0 and RMSE from 1.0 m to
+16.2 m on identical geometry. Ranking ties by *position* fixed that and
+introduced the same defect one step out — the answer then depended on which way
+the plot faced, and rotating the same four points by 180° moved recall from 0.5
+back to 1.0. A maximum matching has neither dependence, which the suite checks
+under translation, rotation, reflection and transposition.
+
+Dominant height has an ordering rule of its own — diameter, then height, then
+identifier — so a tie at the 100-stems-per-hectare cutoff does not depend on
+which stem was typed first.
 
 From the pairing come the accuracy statistics:
 

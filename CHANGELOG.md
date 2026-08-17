@@ -4,6 +4,98 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+Sections below the newest one describe a release as it was published. Defects
+found *after* a release are recorded under the version that fixes them, never
+folded back into the version that shipped with them.
+
+## 0.1.1 — unreleased
+
+Behavioural fixes on top of the released 0.1.0. Nothing here was present in
+0.1.0; each item describes a defect that shipped in it.
+
+Numbered as a patch release: nothing is removed or renamed, and every entry is
+a correction to behaviour that was wrong. Two of them are visible in output —
+`silvispect chm` writes heights that round-trip instead of rounding to three
+decimals, and gains an optional `--precision` to round on request — but neither
+is a new capability. The rounding was the defect.
+
+Two rounds of review after the release found these. As before, each fix carries
+a test that fails against the code as it stood — and where the defect violated a
+general property, that property is what the test asserts, over randomized
+inputs rather than the one raster that exposed it.
+
+Fourth round — a property campaign over 914 randomized stands applied
+transformations (translation, reflection, rotation, permutation) and checked
+what should be invariant under them:
+
+- **The opening function was not spatially equivariant.** Discs were skipped
+  when something had already covered their centre, but covering a centre is not
+  containment — that needs `|p - q| + r <= R`. Equal-radius discs therefore
+  dropped each other in row-major order: on a treeless 4 m x 4 m plot the four
+  equal discs collapsed to the north-west 3x3 block, so reflecting the input
+  changed the answer (199 of 1,200 comparisons), and raising `canopy_threshold`
+  — which can only admit more open ground — lost cells in 1,302 of 1,920
+  transitions. 0.1.0's monotonicity in `min_gap_width` was real, but it
+  thresholded a field whose construction was itself incomplete.
+- **Matching depended on CSV row order at equal distances.** Two crowns and two
+  stems all exactly one metre apart matched one pair in one row order and two in
+  the other, moving recall from 0.5 to 1.0 and RMSE from 1.0 m to 16.2 m on
+  identical geometry.
+- Dominant height had the same defect at the 100-stems-per-hectare cutoff: two
+  30 cm stems of 10 m and 30 m gave whichever was listed first. Ranking is now
+  diameter, then height, then identifier.
+- `silvispect chm` wrote the derived model at three decimals with no way to
+  change it, turning near-equal heights into exact plateaus and changing which
+  cells the detector called apexes — 267 of 300 randomized stands differed from
+  the same analysis run on the unrounded model.
+- Fitted allometry parameters drifted in the sixth decimal under permutation,
+  because floating-point summation order changes the optimiser's path.
+  Observations are sorted before fitting.
+
+Fifth round — a review of those repairs found that three of them had replaced
+one dependence with another, and that a fourth had made the opening function
+too slow to use:
+
+- **Matching had traded row order for map orientation.** Breaking equal-distance
+  ties on coordinates makes the answer depend on which way the plot faces:
+  rotating the same two crowns and two stems by 180 degrees moved recall from
+  0.5 to 1.0 and RMSE from 1.0 m to 16.2 m — the exact defect the tie-break was
+  meant to remove. Equal-distance candidates are now resolved together, by a
+  maximum bipartite matching over that one distance, so the number of pairs a
+  tie yields is a fact about the geometry. Nearer pairs are settled first and
+  are never given up. Checked under six isometries, including translation,
+  rotation, reflection and transposition.
+- **Edge classification ignored the requested connectivity.** `find_gaps`
+  labelled components with the caller's connectivity but always inherited edge
+  contact from eight-connected components, so under `connectivity=4` a diagonal
+  contact carried the edge flag inward: on a 3x3 raster the interior cell was
+  reported as touching the border and `include_edge_gaps=False` discarded it.
+  Both passes now use the same connectivity, and a randomized check asserts that
+  a gap is flagged as an edge gap exactly when it contains a border cell.
+- **The opening tolerance was a fixed number of metres.** Comparisons against
+  the radius field absorbed a `1e-9` slack, which is invisible on a metre-wide
+  cell and total on a nanometre-wide one: at that cell size the four equal discs
+  of a treeless 4x4 plot resolved to two different radii and the width filter
+  admitted every cell whatever width was asked for. The tolerance is now a
+  fraction of the cell size, so the field is covariant with the plot's scale —
+  checked across cell sizes from 1e-9 to 1e6.
+- **`silvispect chm` had moved the rounding boundary, not removed it.** Writing
+  six decimals instead of three still merges heights that differ below the sixth
+  into a plateau, and a plateau has no apex: heights differing at 1e-8 m again
+  gave a different tree count than the same analysis on the unrounded surface.
+  The command now writes the shortest text that reads back as the same float, so
+  the derived model *is* the model the analysis would have used, at any
+  magnitude. `--precision` still rounds on request.
+- **The corrected opening function was superlinear.** Painting every maximal
+  disc cell by cell cost 8.6 s on a treeless 384 x 384 raster, against 0.16 s
+  for the 0.1.0 code — which was fast only because it was dropping discs it
+  should have kept. Discs contained in a neighbour's are now dropped by the
+  honest test `|p - q| + d(p) <= d(q)`, which reads only the distance field and
+  so cannot depend on scan order, and the survivors settle each cell once
+  through a per-row disjoint-set walk. The same raster takes 0.59 s and the cost
+  is now linear in the number of cells. A brute-force comparison over 400
+  randomized rasters confirms the field is unchanged.
+
 ## 0.1.0 — 2026-08-17
 
 First release. Everything below is new.
@@ -65,7 +157,7 @@ First release. Everything below is new.
   `inspect --fail-on <severity>` for use as a CI gate.
 - Seeded synthetic stand generator providing ground truth for the test suite
   and for `silvispect demo`.
-- 250 tests, ruff lint and format configuration, mypy, GitHub Actions CI across
+- 242 tests, ruff lint and format configuration, mypy, GitHub Actions CI across
   Python 3.10–3.13, and a committed sample plot whose reproducibility CI
   verifies.
 - CI builds both distributions, installs the wheel, checks the `py.typed`
@@ -76,10 +168,9 @@ First release. Everything below is new.
 
 ### Corrections before release
 
-Four rounds of independent review found twenty behavioural defects before
+Three rounds of independent review found fifteen behavioural defects before
 release. Each is fixed with a regression test that fails against the code as it
-stood; where the defect violated a general property — monotonicity, spatial
-symmetry, permutation invariance — the property itself is now the test.
+stood.
 
 First round — absent data was being turned into confident numbers:
 
@@ -156,40 +247,7 @@ not monotone, plus four narrower issues:
   wheel. It now runs from a neutral directory and asserts the import resolved
   to site-packages.
 
-Fourth round — a property campaign over 914 randomized stands applied
-transformations (translation, reflection, rotation, permutation) and checked
-what should be invariant under them:
-
-- **The opening function was not spatially equivariant.** Discs were skipped
-  when something had already covered their centre, but covering a centre is not
-  containment — that needs `|p - q| + r <= R`. Equal-radius discs therefore
-  dropped each other in row-major order: on a treeless 4 m x 4 m plot the four
-  equal discs collapsed to the north-west 3x3 block, so reflecting the input
-  changed the answer (199 of 1,200 comparisons), and raising `canopy_threshold`
-  — which can only admit more open ground — lost cells in 1,302 of 1,920
-  transitions. The containment margin is now tracked properly. Round three's
-  monotonicity in `min_gap_width` was real, but it thresholded a field whose
-  construction was itself incomplete.
-- **Matching depended on CSV row order at equal distances.** Two crowns and two
-  stems all exactly one metre apart matched one pair in one row order and two in
-  the other, moving recall from 0.5 to 1.0 and RMSE from 1.0 m to 16.2 m on
-  identical geometry. Ties now break on position and identifier.
-- Dominant height had the same defect at the 100-stems-per-hectare cutoff: two
-  30 cm stems of 10 m and 30 m gave whichever was listed first. Ranking is now
-  diameter, then height, then identifier.
-- `silvispect chm` wrote the derived model at three decimals with no way to
-  change it, turning near-equal heights into exact plateaus and changing which
-  cells the detector called apexes — 267 of 300 randomized stands differed from
-  the same analysis run on the unrounded model. It now writes six decimals by
-  default and takes `--precision`.
-- Fitted allometry parameters drifted in the sixth decimal under permutation,
-  because floating-point summation order changes the optimiser's path.
-  Observations are sorted before fitting.
-
 The changelog previously claimed the first five defects were "all fixed with
 regression tests". Three were only partly fixed, and the tests pinned the
-reproductions rather than the general cases — which is how each later round
-happened. Where a general property exists, it is now tested as one: opening
-monotonicity and spatial equivariance, matching and fitting under permutation,
-and threshold inclusion are all checked over randomized inputs rather than a
-single hand-built example.
+reproductions rather than the general cases — which is how rounds two and three
+happened. Where a general property exists, it is now tested as one.

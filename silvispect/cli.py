@@ -63,9 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     chm.add_argument(
         "--precision",
         type=int,
-        default=6,
-        help="decimals to write; the default keeps heights that differ below a millimetre "
-        "distinct, because rounding them together creates plateaus that change detection",
+        default=None,
+        help="decimals to write; omit to write the shortest text that reads back as the "
+        "same height, so the derived model is the one the analysis would have used. "
+        "Any fixed number of decimals merges heights that differ below it into a "
+        "plateau, which moves the apexes the detector finds",
     )
     chm.set_defaults(handler=_cmd_chm)
 

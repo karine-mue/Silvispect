@@ -478,8 +478,17 @@ class Grid:
     def read(cls, path: str | Path) -> Grid:
         return cls.parse(Path(path).read_text(encoding="utf-8"))
 
-    def to_text(self, *, precision: int = 3) -> str:
-        """Serialise to an ESRI ASCII Grid document."""
+    def to_text(self, *, precision: int | None = 3) -> str:
+        """Serialise to an ESRI ASCII Grid document.
+
+        ``precision`` is the number of decimals to write; ``None`` writes the
+        shortest decimal string that reads back as the same float, so the
+        document round-trips exactly.  Any fixed number of decimals quantises,
+        and quantisation is not a matter of degree here: two heights that differ
+        below the last decimal written become one plateau, which is a different
+        canopy surface.  Choosing a *larger* fixed precision only moves the
+        magnitude at which that happens.
+        """
         head = [
             f"ncols {self.ncols}",
             f"nrows {self.nrows}",
@@ -497,7 +506,7 @@ class Grid:
             )
         return "\n".join(head + body) + "\n"
 
-    def write(self, path: str | Path, *, precision: int = 3) -> Path:
+    def write(self, path: str | Path, *, precision: int | None = 3) -> Path:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(self.to_text(precision=precision), encoding="utf-8")
@@ -519,7 +528,11 @@ def _median(values: Iterable[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
-def _fmt(value: float, precision: int) -> str:
+def _fmt(value: float, precision: int | None) -> str:
+    if precision is None:
+        # ``repr`` of a float is the shortest string that reads back identically,
+        # so the value survives the round trip whatever its magnitude.
+        return repr(float(value))
     text = f"{value:.{precision}f}"
     if "." in text:
         text = text.rstrip("0").rstrip(".")

@@ -344,6 +344,35 @@ class MatchResult:
         }
 
 
+def _augment(
+    crown_index: int,
+    adjacency: dict[int, list[int]],
+    matched_tree: dict[int, int],
+    matched_crown: dict[int, int],
+    visited: set[int],
+) -> bool:
+    """Kuhn's augmenting step, confined to one distance tier.
+
+    Rerouting is allowed only among pairs formed in the current tier, so a
+    nearer pair is never broken to make room for an equally distant one.
+    """
+    for tree_index in adjacency.get(crown_index, ()):
+        if tree_index in visited:
+            continue
+        visited.add(tree_index)
+        holder = matched_tree.get(tree_index)
+        if holder is None or (
+            holder in adjacency
+            and _augment(holder, adjacency, matched_tree, matched_crown, visited)
+        ):
+            if holder is not None:
+                matched_crown.pop(holder, None)
+            matched_tree[tree_index] = crown_index
+            matched_crown[crown_index] = tree_index
+            return True
+    return False
+
+
 def match_trees(
     crowns: Sequence[Crown],
     reference: Sequence[Tree],
@@ -351,55 +380,69 @@ def match_trees(
     tolerance: float = 2.5,
     live_only: bool = True,
 ) -> MatchResult:
-    """Greedily pair crowns with reference trees by planimetric distance.
+    """Pair crowns with reference trees by planimetric distance.
 
-    Candidate pairs closer than ``tolerance`` are considered in ascending
-    distance order and accepted while both partners are still unpaired, which
-    yields a stable one-to-one assignment without needing a full Hungarian
-    solve.
+    Candidate pairs closer than ``tolerance`` are settled in ascending distance
+    order, so a nearer pair is never given up to make room for a further one.
+    Pairs at *equal* distance are settled together, by a maximum matching over
+    that distance alone: how many of them can be honoured is then a fact about
+    the geometry, not about the order the candidates were enumerated in.
     """
     if tolerance <= 0:
         raise InventoryError("tolerance must be positive")
     targets = [tree for tree in reference if tree.is_live] if live_only else list(reference)
 
-    # Ties are broken on geometry and identity, never on position in the file.
-    # Sorting by row index made the outcome depend on the order the CSV happened
-    # to be written in: with two crowns and two stems all exactly one metre
-    # apart, one ordering accepted a single pair and the other accepted two,
-    # moving recall from 0.5 to 1.0 on identical geometry.
-    candidates: list[tuple[float, float, float, str, float, float, str, int, int]] = []
+    # Pairs are grouped by distance and each group is resolved by a maximum
+    # matching, so how many pairs a group yields is a property of the geometry
+    # rather than of any ordering.  Two earlier tie-breaks both failed here: the
+    # row index made the answer depend on the order the CSV happened to be
+    # written in, and absolute coordinates made it depend on which way the plot
+    # was oriented — rotating the same forest 180 degrees moved recall from 0.5
+    # to 1.0.  Distances survive both, so they are the only thing the grouping
+    # uses; within a group, ordering falls back to height and identifier, which
+    # are properties of the trees themselves.
+    tiers: dict[float, list[tuple[int, int]]] = {}
     for i, crown in enumerate(crowns):
         for j, tree in enumerate(targets):
             distance = math.hypot(crown.x - tree.x, crown.y - tree.y)
             if distance <= tolerance:
-                candidates.append(
-                    (
-                        distance,
-                        crown.x,
-                        crown.y,
-                        str(crown.tree_id),
-                        tree.x,
-                        tree.y,
-                        tree.tree_id,
-                        i,
-                        j,
-                    )
-                )
-    candidates.sort()
+                tiers.setdefault(distance, []).append((i, j))
 
-    used_crowns: set[int] = set()
-    used_trees: set[int] = set()
-    matches: list[tuple[Crown, Tree, float]] = []
-    for distance, *_rest, i, j in candidates:
-        if i in used_crowns or j in used_trees:
-            continue
-        used_crowns.add(i)
-        used_trees.add(j)
-        matches.append((crowns[i], targets[j], distance))
+    def crown_rank(index: int) -> tuple[float, str]:
+        return (-crowns[index].height, str(crowns[index].tree_id))
 
-    matches.sort(key=lambda item: item[0].tree_id)
-    omissions = tuple(tree for j, tree in enumerate(targets) if j not in used_trees)
-    commissions = tuple(crown for i, crown in enumerate(crowns) if i not in used_crowns)
+    def tree_rank(index: int) -> tuple[str, float]:
+        return (targets[index].tree_id, -(targets[index].height_m or 0.0))
+
+    matched_tree: dict[int, int] = {}
+    matched_crown: dict[int, int] = {}
+    for distance in sorted(tiers):
+        # Closer pairs are settled first, so a tier only sees partners that no
+        # nearer pair already claimed.
+        adjacency: dict[int, list[int]] = {}
+        for i, j in tiers[distance]:
+            if i in matched_crown or j in matched_tree:
+                continue
+            adjacency.setdefault(i, []).append(j)
+        for options in adjacency.values():
+            options.sort(key=tree_rank)
+        for i in sorted(adjacency, key=crown_rank):
+            if i not in matched_crown:
+                _augment(i, adjacency, matched_tree, matched_crown, set())
+
+    matches = sorted(
+        (
+            (
+                crowns[i],
+                targets[j],
+                math.hypot(crowns[i].x - targets[j].x, crowns[i].y - targets[j].y),
+            )
+            for i, j in matched_crown.items()
+        ),
+        key=lambda item: item[0].tree_id,
+    )
+    omissions = tuple(tree for j, tree in enumerate(targets) if j not in matched_tree)
+    commissions = tuple(crown for i, crown in enumerate(crowns) if i not in matched_crown)
     return MatchResult(tuple(matches), omissions, commissions, tolerance)
 
 

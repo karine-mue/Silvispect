@@ -209,3 +209,64 @@ def test_matching_is_permutation_invariant_over_many_shuffles():
         shuffled = trees[:]
         rng.shuffle(shuffled)
         assert match_trees(crowns, shuffled).as_dict() == baseline
+
+
+def _rigid_transforms():
+    """Isometries of the plane that a stand's geometry must be indifferent to."""
+    return {
+        "identity": lambda x, y: (x, y),
+        "rotate_180": lambda x, y: (-x, -y),
+        "rotate_90": lambda x, y: (-y, x),
+        "reflect_x": lambda x, y: (-x, y),
+        "transpose": lambda x, y: (y, x),
+        "translate": lambda x, y: (x + 137.5, y - 4021.25),
+    }
+
+
+def test_matching_is_invariant_under_rigid_motion():
+    """Matching describes a forest, not a coordinate frame.
+
+    Breaking equal-distance ties on position merely traded a dependence on CSV
+    row order for a dependence on which way the plot happened to be oriented:
+    the same two crowns and two stems, all exactly one metre apart, matched one
+    pair in one frame and two after rotating the whole scene.  How many pairs a
+    tie yields is a property of the geometry, so every isometry must agree.
+    """
+    import random
+
+    rng = random.Random(2026)
+    for trial in range(60):
+        count = rng.randint(2, 7)
+        # Place stems on a lattice and crowns exactly one metre away in a random
+        # direction, which manufactures ties in bulk.
+        stems = [(float(rng.randint(0, 4)), float(rng.randint(0, 4))) for _ in range(count)]
+        tops = [
+            (x + rng.choice([-1.0, 1.0, 0.0]), y + rng.choice([0.0, -1.0, 1.0])) for x, y in stems
+        ]
+        baseline = None
+        for name, move in _rigid_transforms().items():
+            crowns = [crown(i + 1, *move(x, y), 20.0 + i) for i, (x, y) in enumerate(tops)]
+            trees = [
+                Tree(f"S{i:02d}", *move(x, y), height_m=20.0 + i) for i, (x, y) in enumerate(stems)
+            ]
+            result = match_trees(crowns, trees, tolerance=1.01)
+            summary = (len(result.matches), len(result.omissions), len(result.commissions))
+            if baseline is None:
+                baseline = summary
+            assert summary == baseline, f"trial {trial}: {name} disagreed with identity"
+
+
+def test_matching_never_gives_up_a_nearer_pair():
+    """Resolving ties must not reroute a pair that no tie was involved in."""
+    crowns = [crown(1, 0.0, 0.0, 20.0), crown(2, 1.0, 0.0, 20.0)]
+    trees = [Tree("A", 0.1, 0.0, height_m=20.0), Tree("B", 2.0, 0.0, height_m=20.0)]
+    result = match_trees(crowns, trees, tolerance=1.5)
+    paired = {c.tree_id: t.tree_id for c, t, _ in result.matches}
+    assert paired == {1: "A", 2: "B"}
+
+
+def test_matching_pairs_as_many_ties_as_the_geometry_allows():
+    """Two crowns and two stems mutually one metre apart admit two pairs."""
+    crowns = [crown(1, 0.0, 0.0, 10.0), crown(2, 2.0, 0.0, 20.0)]
+    trees = [Tree("A", 1.0, 0.0, height_m=11.0), Tree("B", 0.0, 1.0, height_m=31.0)]
+    assert len(match_trees(crowns, trees, tolerance=1.01).matches) == 2

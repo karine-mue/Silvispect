@@ -7,12 +7,14 @@ import math
 import pytest
 
 from silvispect.canopy import (
+    _canopy_distance_field,
     _opened_gap_mask,
     canopy_cover,
     canopy_height_model,
     distance_to_canopy,
     find_gaps,
     gap_fraction,
+    opening_radius_field,
     rugosity,
     vertical_strata,
 )
@@ -271,3 +273,201 @@ def test_opening_grows_with_the_canopy_threshold():
             if previous is not None:
                 assert previous <= current, f"threshold {threshold} lost cells"
             previous = current
+
+
+def _rotate_quarter(grid: Grid) -> Grid:
+    """Rotate a raster 90 degrees, which is an isometry of the cell lattice."""
+    out = Grid(
+        ncols=grid.nrows,
+        nrows=grid.ncols,
+        xllcorner=grid.xllcorner,
+        yllcorner=grid.yllcorner,
+        cellsize=grid.cellsize,
+        nodata_value=grid.nodata_value,
+    )
+    out.values = [None] * (grid.ncols * grid.nrows)
+    for row in range(grid.nrows):
+        for col in range(grid.ncols):
+            out.set(col, grid.nrows - 1 - row, grid.get(row, col))
+    return out
+
+
+def test_opening_field_is_covariant_with_the_cell_size():
+    """Rescaling the plot rescales the answer; it does not change its shape.
+
+    The opening field carries map units, so the only fixed quantity a
+    comparison against it may use is a fraction of the cell size.  An absolute
+    tolerance is invisible on a metre-wide cell and swamps a millimetre-wide
+    one: at a cell size of 1e-9 the four equal discs of a treeless 4x4 plot
+    collapsed to two distinct radii, and the width filter admitted every cell
+    whatever was asked for.
+    """
+    import random
+
+    rng = random.Random(31)
+    heights = [rng.choice([0.0, 0.0, 0.0, 20.0]) for _ in range(36)]
+    reference: list[float] | None = None
+    for cellsize in (1e-9, 1e-3, 1.0, 10.0, 1e6):
+        chm = Grid.filled(6, 6, 0.0, cellsize=cellsize)
+        chm.values = list(heights)
+        field = opening_radius_field(chm, threshold=2.0)
+        shape = [value / cellsize for value in field]
+        if reference is None:
+            reference = shape
+        assert all(
+            math.isclose(a, b, rel_tol=1e-9) for a, b in zip(shape, reference, strict=True)
+        ), f"cell size {cellsize:g} changed the shape of the field"
+
+        # The width filter has to scale with it, so the same relative width
+        # selects the same cells.
+        mask, _ = _opened_gap_mask(chm, 2.0, 1.5 * cellsize)
+        expected = [value >= 1.5 * cellsize * (1 - 1e-9) for value in field]
+        assert mask == [keep and chm.values[i] < 2.0 for i, keep in enumerate(expected)], (
+            f"cell size {cellsize:g} changed which cells the width filter kept"
+        )
+
+
+def test_opening_field_is_equivariant_under_rotation():
+    """A quarter turn of the plot must be a quarter turn of the field."""
+    import random
+
+    rng = random.Random(77)
+    for _ in range(40):
+        chm = Grid.filled(9, 7, 0.0, cellsize=1.0)
+        for row, col in chm.cells():
+            chm.set(row, col, 20.0 if rng.random() < 0.3 else 0.0)
+        field = Grid.from_rows(
+            [
+                [
+                    opening_radius_field(chm, threshold=2.0)[r * chm.ncols + c]
+                    for c in range(chm.ncols)
+                ]
+                for r in range(chm.nrows)
+            ]
+        )
+        turned = _rotate_quarter(chm)
+        after = opening_radius_field(turned, threshold=2.0)
+        assert _rotate_quarter(field).values == after
+
+
+def test_opening_field_is_the_union_of_every_disc_that_fits():
+    """The field is defined by geometry alone, so a brute-force scan must agree.
+
+    This is the invariant behind the reflection and rotation checks: no disc
+    that fits inside the opening may be dropped, whatever order the scan visits
+    the cells in and whatever bookkeeping it uses to stay cheap.
+    """
+    import random
+
+    rng = random.Random(505)
+    for _ in range(60):
+        nrows, ncols = rng.randint(1, 9), rng.randint(1, 9)
+        chm = Grid.filled(nrows, ncols, 0.0, cellsize=rng.choice([0.5, 1.0, 3.0]))
+        chm.values = [
+            None if rng.random() < 0.08 else rng.uniform(0.0, 6.0) for _ in range(nrows * ncols)
+        ]
+        distances = _canopy_distance_field(chm, 2.0)
+        expected = [0.0] * len(chm.values)
+        for centre, value in enumerate(chm.values):
+            if value is None or value >= 2.0 or distances[centre] <= 0.0:
+                continue
+            crow, ccol = divmod(centre, ncols)
+            for position in range(len(chm.values)):
+                prow, pcol = divmod(position, ncols)
+                offset = math.hypot((prow - crow) * chm.cellsize, (pcol - ccol) * chm.cellsize)
+                if offset <= distances[centre] and expected[position] < distances[centre]:
+                    expected[position] = distances[centre]
+        assert opening_radius_field(chm, threshold=2.0) == expected
+
+
+def test_opening_field_cost_grows_with_the_raster_not_the_discs():
+    """Painting every maximal disc cell by cell is cubic in the plot size.
+
+    A treeless plot is the worst case: every cell carries a disc and the discs
+    are as large as the plot.  Dropping discs contained in a neighbour's and
+    settling each surviving cell once keeps the work proportional to the number
+    of cells, so sixteen times the cells must not cost sixteen times over: the
+    superlinear version ran 61x here where this one runs 17x.
+    """
+    import time
+
+    def elapsed(side: int) -> float:
+        chm = Grid.filled(side, side, 0.0, cellsize=1.0)
+        start = time.perf_counter()
+        opening_radius_field(chm, threshold=2.0)
+        return time.perf_counter() - start
+
+    small = max(elapsed(32), 1e-4)
+    large = elapsed(128)
+    assert large / small < 32.0, f"sixteen times the cells cost {large / small:.1f}x"
+
+
+def test_edge_contact_follows_the_requested_connectivity():
+    """Under four-connectivity a corner touch does not join two gaps.
+
+    Edge contact is inherited from the untrimmed sub-canopy component, so that
+    component has to be built with the connectivity the caller asked for.  Built
+    with eight regardless, a diagonal contact carried the edge flag inward and
+    ``include_edge_gaps=False`` discarded an interior opening.
+    """
+    chm = Grid.from_rows([[0.0, 20.0, 20.0], [20.0, 0.0, 20.0], [20.0, 20.0, 20.0]])
+    four = find_gaps(chm, threshold=2.0, min_area=0.0, min_width=0.0, connectivity=4)
+    assert [gap.touches_edge for gap in four] == [True, False]
+    assert (
+        len(
+            find_gaps(
+                chm,
+                threshold=2.0,
+                min_area=0.0,
+                min_width=0.0,
+                connectivity=4,
+                include_edge_gaps=False,
+            )
+        )
+        == 1
+    )
+
+    eight = find_gaps(chm, threshold=2.0, min_area=0.0, min_width=0.0, connectivity=8)
+    assert [gap.touches_edge for gap in eight] == [True]
+
+
+def test_edge_flag_agrees_with_the_component_it_labels():
+    """Whatever the connectivity, a gap is an edge gap exactly when it has an edge cell.
+
+    With ``min_width=0`` nothing is trimmed away, so the reported flag and the
+    cells of the gap have to tell the same story — for every connectivity, on
+    every raster.
+    """
+    import random
+
+    rng = random.Random(88)
+    for _ in range(60):
+        nrows, ncols = rng.randint(2, 8), rng.randint(2, 8)
+        chm = Grid.filled(nrows, ncols, 0.0, cellsize=1.0)
+        for row, col in chm.cells():
+            chm.set(row, col, 20.0 if rng.random() < 0.45 else 0.0)
+        for connectivity in (4, 8):
+            gaps = find_gaps(
+                chm,
+                threshold=2.0,
+                min_area=0.0,
+                min_width=0.0,
+                connectivity=connectivity,
+            )
+            for gap in gaps:
+                on_border = any(
+                    row in (0, nrows - 1) or col in (0, ncols - 1) for row, col in gap.cells
+                )
+                assert gap.touches_edge == on_border, (
+                    f"connectivity {connectivity}: gap {gap.gap_id} flagged "
+                    f"{gap.touches_edge} with border cells {on_border}"
+                )
+            kept = find_gaps(
+                chm,
+                threshold=2.0,
+                min_area=0.0,
+                min_width=0.0,
+                connectivity=connectivity,
+                include_edge_gaps=False,
+            )
+            assert len(kept) == sum(not gap.touches_edge for gap in gaps)
