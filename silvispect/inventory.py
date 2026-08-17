@@ -362,18 +362,35 @@ def match_trees(
         raise InventoryError("tolerance must be positive")
     targets = [tree for tree in reference if tree.is_live] if live_only else list(reference)
 
-    candidates: list[tuple[float, int, int]] = []
+    # Ties are broken on geometry and identity, never on position in the file.
+    # Sorting by row index made the outcome depend on the order the CSV happened
+    # to be written in: with two crowns and two stems all exactly one metre
+    # apart, one ordering accepted a single pair and the other accepted two,
+    # moving recall from 0.5 to 1.0 on identical geometry.
+    candidates: list[tuple[float, float, float, str, float, float, str, int, int]] = []
     for i, crown in enumerate(crowns):
         for j, tree in enumerate(targets):
             distance = math.hypot(crown.x - tree.x, crown.y - tree.y)
             if distance <= tolerance:
-                candidates.append((distance, i, j))
+                candidates.append(
+                    (
+                        distance,
+                        crown.x,
+                        crown.y,
+                        str(crown.tree_id),
+                        tree.x,
+                        tree.y,
+                        tree.tree_id,
+                        i,
+                        j,
+                    )
+                )
     candidates.sort()
 
     used_crowns: set[int] = set()
     used_trees: set[int] = set()
     matches: list[tuple[Crown, Tree, float]] = []
-    for distance, i, j in candidates:
+    for distance, *_rest, i, j in candidates:
         if i in used_crowns or j in used_trees:
             continue
         used_crowns.add(i)

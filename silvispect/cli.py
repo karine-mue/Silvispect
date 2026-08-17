@@ -60,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
     chm.add_argument("--dsm", required=True, type=Path, help="digital surface model (.asc)")
     chm.add_argument("--dtm", required=True, type=Path, help="digital terrain model (.asc)")
     chm.add_argument("-o", "--output", type=Path, help="write the canopy height model here")
+    chm.add_argument(
+        "--precision",
+        type=int,
+        default=6,
+        help="decimals to write; the default keeps heights that differ below a millimetre "
+        "distinct, because rounding them together creates plateaus that change detection",
+    )
     chm.set_defaults(handler=_cmd_chm)
 
     detect = subparsers.add_parser("detect", help="detect trees and delineate crowns")
@@ -154,7 +161,7 @@ def _cmd_chm(args: argparse.Namespace, out) -> int:
     dtm = Grid.read(args.dtm)
     chm = canopy_height_model(dsm, dtm)
     if args.output:
-        chm.write(args.output)
+        chm.write(args.output, precision=args.precision)
         print(f"wrote {args.output}", file=out)
     stats = chm.stats()
     print(

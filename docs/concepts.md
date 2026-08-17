@@ -44,7 +44,7 @@ artefact of resolution:
 ```console
 $ silvispect gaps data/plot-a1-chm.asc --min-width 0
 3 gaps at or above 25 m2 and 0.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        511 m2  width  12.3 m  ...  [edge]   <- one opening fused to the web
+  gap 1        511 m2  width  12.3 m  ...   <- one opening fused to the web
 ```
 
 Silvispect applies the **Brokaw criterion**: a gap must be wide enough to
@@ -56,7 +56,7 @@ components" filter cannot do. Labelling then runs on the opened mask:
 ```console
 $ silvispect gaps data/plot-a1-chm.asc
 3 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        152 m2  width  12.3 m  ...  [edge]   <- the opening alone
+  gap 1        170 m2  width  12.3 m  ...   <- the opening alone
 ```
 
 Both report the *same* inscribed width: the difference is entirely tentacles of
@@ -70,13 +70,28 @@ and Silvispect downgrades its severity accordingly.
 
 The opening is computed as an **opening function**: one pass records, for every
 cell, the radius of the largest disc that fits in the sub-canopy area and still
-covers that cell, and the mask is a threshold on that field. The obvious
-alternative — erode by the radius, then dilate by it — mixes two different
-quantisations, and the result is not monotone: on a treeless 10 m x 10 m plot
-the reported opening ran 64, 96, 64, 88, 60 cells as the requested width rose a
-metre at a time, so *tightening* `min_width` could enlarge a gap and raise a
-finding that a looser setting did not. A threshold on a single scalar field
-cannot behave that way — a larger radius always selects a subset.
+covers that cell, and the mask is a threshold on that field.
+
+That shape is deliberate, and two earlier attempts at it were wrong in
+instructive ways.
+
+*Erode by the radius, then dilate by it* is the textbook construction, but it
+mixes two quantisations — a cut on the distance field, then a fresh chamfer walk
+out of the eroded core — and the result is not monotone. On a treeless
+10 m × 10 m plot the reported opening ran 64, 96, 64, 88, 60 cells as the
+requested width rose a metre at a time, so *tightening* `min_width` could
+enlarge a gap and raise a finding a looser setting did not. A threshold on a
+single scalar field cannot behave that way: a larger radius always selects a
+subset.
+
+Painting the field needs care too. Discs are painted largest-first, and one is
+skipped only when it is genuinely *contained* in a disc already painted —
+`|p − q| + r ≤ R`, not merely "something covered p's centre". Skipping on
+coverage alone drops discs that reach cells no other disc does, which left the
+field asymmetric: on a treeless 4 m × 4 m plot the four equal discs collapsed to
+the north-west 3×3 block, so reflecting the input changed the answer, and
+raising `canopy_threshold` — which can only admit *more* open ground — could
+lose cells.
 
 Two consequences of "as mapped" are worth stating plainly. The **plot edge is a
 boundary** for the inscribed circle: nothing is known beyond the extent, so a
@@ -145,6 +160,14 @@ tolerance radius are sorted by distance and accepted while both partners are
 still unpaired. This yields a stable one-to-one assignment without a full
 Hungarian solve, which the problem size does not justify.
 
+**Ties are settled by geometry, never by file order.** Equal distances are
+ranked by position and identifier, so shuffling the rows of an inventory cannot
+change the result. It could before: two crowns and two stems all exactly one
+metre apart matched one pair in one row order and two in the other, moving
+recall from 0.5 to 1.0 on identical geometry. Dominant height ranks the same way
+— diameter, then height, then identifier — so a tie at the 100-stems-per-hectare
+cutoff no longer depends on which stem was typed first.
+
 From the pairing come the accuracy statistics:
 
 | Statistic | Meaning |
@@ -184,7 +207,10 @@ trap when choosing starting values.)
 
 Fitting is least squares by Nelder-Mead simplex search
 ([`optimize.py`](../silvispect/optimize.py)), restarted once from the incumbent
-to tighten the simplex. No derivatives, no SciPy.
+to tighten the simplex. No derivatives, no SciPy. Observations are sorted before
+fitting: the objective is permutation-invariant in real arithmetic but not in
+floating point, and without a canonical order the same stand reported parameters
+that differed in the sixth decimal depending on row order.
 
 **Curves are fitted per species.** A single pooled curve on a mixed stand
 systematically flags the minority species as outliers — in a test stand of

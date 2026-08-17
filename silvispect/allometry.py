@@ -237,7 +237,11 @@ def fit_height_diameter(
         raise AllometryError(f"unknown model {model!r}; choose from {sorted(MODELS)}")
     if min_points < 1:
         raise AllometryError("min_points must be at least 1")
-    pairs = _as_pairs(data)
+    # Least squares is permutation-invariant in real arithmetic but not in
+    # floating point: a different summation order nudges the optimiser onto a
+    # slightly different path, so the same stand reported different parameters
+    # depending on the order its rows were listed in.  Fit in a canonical order.
+    pairs = sorted(_as_pairs(data))
     if not pairs:
         raise AllometryError("no paired diameter and height measurements to fit")
     if len(pairs) < min_points:

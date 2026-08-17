@@ -225,11 +225,19 @@ def opening_radius_field(chm: Grid, *, threshold: float = 2.0) -> list[float]:
         ),
         key=lambda position: -distances[position],
     )
+    # ``margin[c]`` is the largest ``R - |c - q|`` over painted discs ``(q, R)``.
+    # Disc ``(p, r)`` lies inside a painted disc exactly when ``margin[p] >= r``,
+    # which is the real containment test: ``|p - q| + r <= R``.  Skipping merely
+    # because some disc *covered p's centre* is unsound — a wider disc centred
+    # elsewhere need not contain this one — and it made the field asymmetric:
+    # on a treeless 4x4 plot the four equal discs collapsed to the north-west
+    # 3x3 block, so reflecting the input changed the answer.
+    margin = [-math.inf] * len(chm.values)
     cellsize = chm.cellsize
     for position in candidates:
         reach = distances[position]
-        if radii[position] >= reach:
-            continue  # a bigger disc already covers this cell
+        if margin[position] >= reach - 1e-9:
+            continue  # this disc lies inside one already painted
         row, col = divmod(position, chm.ncols)
         span = int(reach / cellsize)
         for drow in range(-span, span + 1):
@@ -238,13 +246,17 @@ def opening_radius_field(chm: Grid, *, threshold: float = 2.0) -> list[float]:
                 continue
             dy = drow * cellsize
             width = math.sqrt(max(0.0, reach * reach - dy * dy))
+            base = nrow * chm.ncols
             for dcol in range(-int(width / cellsize), int(width / cellsize) + 1):
                 ncol = col + dcol
                 if not 0 <= ncol < chm.ncols:
                     continue
-                index = nrow * chm.ncols + ncol
+                index = base + ncol
                 if radii[index] < reach:
                     radii[index] = reach
+                slack = reach - math.hypot(dy, dcol * cellsize)
+                if margin[index] < slack:
+                    margin[index] = slack
     return radii
 
 

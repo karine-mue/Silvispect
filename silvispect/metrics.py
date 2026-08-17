@@ -102,7 +102,14 @@ def dominant_height(trees: Sequence[Tree], area_ha: float) -> float | None:
     if not candidates:
         return None
     count = max(1, min(len(candidates), round(100 * area_ha)))
-    ranked = sorted(candidates, key=lambda tree: tree.dbh_cm or 0.0, reverse=True)[:count]
+    # Ties at the cutoff must not be settled by inventory row order: two 30 cm
+    # stems of 10 m and 30 m gave whichever height happened to be listed first.
+    # Rank by diameter, then height, then identifier — all properties of the
+    # tree rather than of the file.
+    ranked = sorted(
+        candidates,
+        key=lambda tree: (-(tree.dbh_cm or 0.0), -(tree.height_m or 0.0), tree.tree_id),
+    )[:count]
     return sum(tree.height_m for tree in ranked) / len(ranked)  # type: ignore[misc]
 
 

@@ -186,3 +186,26 @@ def test_matching_rejects_bad_tolerance():
 def test_shift_trees():
     moved = shift_trees([Tree("a", 1.0, 2.0)], 10.0, -1.0)
     assert (moved[0].x, moved[0].y) == (11.0, 1.0)
+
+
+def test_matching_is_independent_of_record_order():
+    """Equal distances must not let CSV row order decide the match count."""
+    crowns = [crown(1, 0.0, 0.0, 10.0), crown(2, 2.0, 0.0, 20.0)]
+    a = Tree("A", 1.0, 0.0, height_m=11.0)
+    b = Tree("B", 0.0, 1.0, height_m=31.0)
+    forward = match_trees(crowns, [a, b], tolerance=1.01)
+    backward = match_trees(crowns, [b, a], tolerance=1.01)
+    assert forward.as_dict() == backward.as_dict()
+
+
+def test_matching_is_permutation_invariant_over_many_shuffles():
+    import random
+
+    rng = random.Random(4)
+    crowns = [crown(i, float(i % 5), float(i // 5), 20.0) for i in range(1, 16)]
+    trees = [Tree(f"f{i}", float(i % 5) + 0.2, float(i // 5), height_m=20.0) for i in range(15)]
+    baseline = match_trees(crowns, trees).as_dict()
+    for _ in range(25):
+        shuffled = trees[:]
+        rng.shuffle(shuffled)
+        assert match_trees(crowns, shuffled).as_dict() == baseline

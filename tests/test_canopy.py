@@ -215,3 +215,59 @@ def test_tightening_the_width_never_raises_a_new_area_finding():
         (find_gaps(chm, threshold=2.0, min_area=1.0, min_width=w) or [None])[0] for w in (5.9, 6.0)
     ]
     assert areas[1] is None or areas[0] is None or areas[1].area <= areas[0].area
+
+
+def _reflect_horizontally(grid: Grid) -> Grid:
+    out = grid.like()
+    for row in range(grid.nrows):
+        for col in range(grid.ncols):
+            out.set(row, col, grid.get(row, grid.ncols - 1 - col))
+    return out
+
+
+def test_opening_covers_every_disc_that_fits():
+    """Four equal discs cover a treeless 4x4 plot; none may be dropped.
+
+    Skipping a disc because its centre was already covered is unsound — a disc
+    of the same radius centred elsewhere does not contain it — and it made the
+    result depend on which cell was visited first.
+    """
+    chm = Grid.filled(4, 4, 0.0, cellsize=1.0)
+    mask, _ = _opened_gap_mask(chm, 2.0, 1.5)
+    assert sum(mask) == 16
+
+
+def test_opening_commutes_with_reflection():
+    """Geometry has no preferred direction, so neither may the opening."""
+    import random
+
+    rng = random.Random(7)
+    for _ in range(40):
+        chm = Grid.filled(10, 10, 0.0, cellsize=1.0)
+        for row, col in chm.cells():
+            chm.set(row, col, 20.0 if rng.random() < 0.3 else 0.0)
+        direct, _ = _opened_gap_mask(chm, 2.0, 1.5)
+        as_grid = Grid.from_rows(
+            [[1.0 if direct[r * 10 + c] else 0.0 for c in range(10)] for r in range(10)]
+        )
+        reflected_after = [value == 1.0 for value in _reflect_horizontally(as_grid).values]
+        reflected_before, _ = _opened_gap_mask(_reflect_horizontally(chm), 2.0, 1.5)
+        assert reflected_after == reflected_before
+
+
+def test_opening_grows_with_the_canopy_threshold():
+    """A higher threshold admits more sub-canopy area, so the opening can only grow."""
+    import random
+
+    rng = random.Random(3)
+    for _ in range(40):
+        chm = Grid.filled(10, 10, 0.0, cellsize=1.0)
+        for row, col in chm.cells():
+            chm.set(row, col, rng.uniform(0.0, 5.0))
+        previous: set[int] | None = None
+        for threshold in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
+            mask, _ = _opened_gap_mask(chm, threshold, 1.5)
+            current = {i for i, keep in enumerate(mask) if keep}
+            if previous is not None:
+                assert previous <= current, f"threshold {threshold} lost cells"
+            previous = current

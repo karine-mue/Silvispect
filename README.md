@@ -81,9 +81,9 @@ crown   min 2.8 m  mean 4.1 m  max 5.5 m
 # Map the canopy openings
 $ silvispect gaps data/plot-a1-chm.asc
 3 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        152 m2  width  12.3 m  centre (612525.3, 6642009.1)  [edge]
-  gap 2         50 m2  width   5.8 m  centre (612545.5, 6642035.5)  [edge]
-  gap 3         41 m2  width   5.8 m  centre (612508.6, 6642018.6)  [edge]
+  gap 1        170 m2  width  12.3 m  centre (612525.4, 6642009.3)  [edge]
+  gap 2         68 m2  width   5.8 m  centre (612545.6, 6642035.5)  [edge]
+  gap 3         51 m2  width   5.8 m  centre (612508.6, 6642018.5)  [edge]
 
 # Compare the detections against the field record
 $ silvispect match data/plot-a1-trees.csv --chm data/plot-a1-chm.asc
@@ -239,7 +239,7 @@ in [`docs/data-formats.md`](docs/data-formats.md).
 
 ```console
 $ pip install -e ".[dev]"
-$ pytest              # 242 tests
+$ pytest              # 250 tests
 $ ruff check .
 $ ruff format --check .
 ```

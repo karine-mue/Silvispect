@@ -254,3 +254,21 @@ def test_malformed_inventory_is_reported(tmp_path):
     broken.write_text("tree_id,dbh_cm\nA,30\n", encoding="utf-8")
     code, _ = run("metrics", broken, "--area-ha", 1.0)
     assert code == EXIT_ERROR
+
+
+def test_chm_command_preserves_sub_millimetre_differences(tmp_path):
+    """Rounding near-equal heights together creates plateaus that move apexes."""
+    header = "ncols 6\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n"
+    (tmp_path / "dsm.asc").write_text(header + "20.0004 20.00049 19 18 17 21\n", encoding="utf-8")
+    (tmp_path / "dtm.asc").write_text(header + "0 0 0 0 0 0\n", encoding="utf-8")
+    derived = tmp_path / "derived.asc"
+    code, _ = run(
+        "chm", "--dsm", tmp_path / "dsm.asc", "--dtm", tmp_path / "dtm.asc", "-o", derived
+    )
+    assert code == EXIT_OK
+    values = Grid.read(derived).values
+    assert values[0] != values[1], "distinct heights must not collapse into a plateau"
+
+    _, direct = run("detect", tmp_path / "dsm.asc", "--smooth-radius", 0, "--json")
+    _, through = run("detect", derived, "--smooth-radius", 0, "--json")
+    assert json.loads(direct)["tree_count"] == json.loads(through)["tree_count"]

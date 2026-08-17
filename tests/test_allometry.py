@@ -196,3 +196,26 @@ def test_nelder_mead_respects_the_iteration_cap():
     result = nelder_mead(lambda p: (p[0] - 5.0) ** 2, [0.0], max_iterations=2)
     assert result.iterations <= 2
     assert not result.converged
+
+
+def test_fit_is_independent_of_record_order():
+    """Least squares is permutation-invariant; the serialised fit must be too."""
+    import random
+
+    pairs = [
+        (50.7, 29.77),
+        (29.1, 24.65),
+        (36.6, 23.26),
+        (43.5, 27.43),
+        (51.7, 29.18),
+        (40.4, 28.77),
+        (32.8, 22.88),
+        (43.9, 23.24),
+    ]
+    rng = random.Random(2)
+    for family in sorted(MODELS):
+        baseline = fit_height_diameter(pairs, model=family).as_dict()
+        for _ in range(5):
+            shuffled = pairs[:]
+            rng.shuffle(shuffled)
+            assert fit_height_diameter(shuffled, model=family).as_dict() == baseline

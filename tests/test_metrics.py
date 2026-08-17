@@ -190,3 +190,10 @@ def test_yield_basis_count_exposes_the_partial_subset():
     assert metrics.yield_basis_count == 1
     assert metrics.volume_per_ha_m3 == pytest.approx(stem_volume(trees[0]))
     assert metrics.as_dict()["yield_basis_count"] == 1
+
+
+def test_dominant_height_tie_at_the_cutoff_ignores_record_order():
+    """Two equal diameters at the cutoff must not resolve by row order."""
+    short = Tree("a", 0.0, 0.0, dbh_cm=30.0, height_m=10.0)
+    tall = Tree("b", 1.0, 1.0, dbh_cm=30.0, height_m=30.0)
+    assert dominant_height([short, tall], 0.01) == dominant_height([tall, short], 0.01)
