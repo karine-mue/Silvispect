@@ -7,6 +7,7 @@ import math
 import pytest
 
 from silvispect.canopy import (
+    _opened_gap_mask,
     canopy_cover,
     canopy_height_model,
     distance_to_canopy,
@@ -183,3 +184,34 @@ def test_interior_gap_width_is_unaffected_by_the_edge_bound():
     gap = find_gaps(chm, threshold=2.0, min_area=1.0, min_width=0.0)[0]
     assert gap.touches_edge is False
     assert 7.0 <= gap.width <= 9.0
+
+
+def test_opening_is_monotone_in_the_requested_width():
+    """A stricter width must never enlarge an opening.
+
+    Erosion followed by dilation mixed two quantisations and oscillated, so a
+    tighter `min_width` could grow a gap and raise a finding a looser setting
+    did not.  The opening function makes the family nested by construction.
+    """
+    import random
+
+    rng = random.Random(11)
+    for _ in range(60):
+        chm = Grid.filled(12, 12, 0.0, cellsize=1.0)
+        for row, col in chm.cells():
+            chm.set(row, col, 20.0 if rng.random() < 0.35 else 0.0)
+        previous: set[int] | None = None
+        for width in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0):
+            mask, _ = _opened_gap_mask(chm, 2.0, width / 2.0)
+            current = {i for i, keep in enumerate(mask) if keep}
+            if previous is not None:
+                assert current <= previous, f"width {width} added cells"
+            previous = current
+
+
+def test_tightening_the_width_never_raises_a_new_area_finding():
+    chm = Grid.filled(10, 10, 0.0, cellsize=1.0)
+    areas = [
+        (find_gaps(chm, threshold=2.0, min_area=1.0, min_width=w) or [None])[0] for w in (5.9, 6.0)
+    ]
+    assert areas[1] is None or areas[0] is None or areas[1].area <= areas[0].area

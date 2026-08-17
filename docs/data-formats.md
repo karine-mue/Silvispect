@@ -41,6 +41,10 @@ body are irrelevant — the parser reads tokens, not lines.
 - **Nodata becomes `None` in memory**, never a number. Statistics, focal
   operations and cell-wise arithmetic all propagate the absence rather than
   averaging in a `-9999`.
+- **Every number must be finite.** `inf` and `nan` parse as floats but are not
+  measurements, and they travel unnoticed into comparisons that are always
+  false and into JSON no strict parser will read back, so they are rejected on
+  input.
 - **Map units are assumed metric.** Areas are reported in m² and hectares.
 - A projected coordinate system is assumed; degrees will produce meaningless
   areas and distances.
@@ -109,8 +113,14 @@ these aliases are accepted:
 
 Empty cells and the literals `NA`, `NaN`, `NULL` and `-` (case-insensitive) all
 parse as missing. A non-numeric value anywhere else is an **error**, not a
-silent `None`: `row 7: dbh_cm value 'approx 30' is not numeric`. Blank rows are
+silent `None`: `row 7: dbh_cm value 'approx 30' is not numeric`. A numeric but
+non-finite value is an error too — `inf` is not a diameter. Blank rows are
 skipped.
+
+A file with a header and no rows is a valid, *empty* inventory: somebody counted
+and found nothing. That is different from supplying no inventory at all, and the
+report says so — `metrics_source: field` with a count of zero, rather than
+`none`.
 
 ### Live status
 

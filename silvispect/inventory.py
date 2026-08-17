@@ -144,11 +144,16 @@ def _to_float(value: str | None, *, field_name: str, row_number: int) -> float |
     if text == "" or text.upper() in {"NA", "NAN", "NULL", "-"}:
         return None
     try:
-        return float(text)
+        number = float(text)
     except ValueError as exc:
         raise InventoryError(
             f"row {row_number}: {field_name} value {value!r} is not numeric"
         ) from exc
+    if not math.isfinite(number):
+        raise InventoryError(
+            f"row {row_number}: {field_name} value {value!r} is not a finite number"
+        )
+    return number
 
 
 def parse_trees(text: str) -> list[Tree]:

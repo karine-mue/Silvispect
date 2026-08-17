@@ -431,8 +431,10 @@ class Grid:
                 raise GridError(f"header line {cursor + 1} has no value")
             try:
                 header[key] = float(parts[1])
-            except ValueError as exc:  # pragma: no cover - defensive
+            except ValueError as exc:
                 raise GridError(f"bad header value on line {cursor + 1}") from exc
+            if not math.isfinite(header[key]):
+                raise GridError(f"header field {key!r} must be a finite number, got {parts[1]!r}")
             cursor += 1
         for missing in ("ncols", "nrows", "cellsize"):
             if missing not in header:
@@ -465,6 +467,10 @@ class Grid:
                 number = float(token)
             except ValueError as exc:
                 raise GridError(f"non-numeric cell value {token!r}") from exc
+            if not math.isfinite(number):
+                # A height of infinity is not a measurement, and it would travel
+                # all the way to a report that cannot serialise it.
+                raise GridError(f"cell value {token!r} is not a finite number")
             values.append(None if math.isclose(number, nodata, abs_tol=1e-9) else number)
         return cls(ncols, nrows, xll, yll, cellsize, nodata, values)
 

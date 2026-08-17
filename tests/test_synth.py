@@ -144,7 +144,7 @@ def test_reported_area_follows_the_raster_not_the_request():
 
 
 def test_every_truth_tree_paints_a_cell_even_on_coarse_rasters():
-    """Ground truth is only ground truth if it is visible in the raster."""
+    """Every stem reaches its own cell, even when its crown is sub-cell sized."""
     from silvispect.grid import Grid
     from silvispect.synth import _render_crown
 
@@ -171,3 +171,38 @@ def test_every_truth_tree_paints_a_cell_even_on_coarse_rasters():
         )
         _render_crown(probe, tree, stand.config)
         assert any(value for value in probe.values), f"{tree.tree_id} painted nothing"
+
+
+def test_taller_crowns_occlude_shorter_neighbours_in_the_composite():
+    """The surface keeps the maximum, so a stem can be painted yet invisible.
+
+    This is not a generator defect — a canopy height model records the top of
+    the canopy, and a suppressed stem leaves no trace in one.  The test pins the
+    behaviour so the guarantee is not over-read as "every tree is visible".
+    """
+    stand = synthesize(
+        SynthConfig(
+            width=100.0,
+            height=100.0,
+            cellsize=10.0,
+            stems_per_ha=300.0,
+            seed=4,
+            gap_count=0,
+            surface_noise=0.0,
+        )
+    )
+    occupied = sum(1 for value in stand.chm.values if value and value > 0)
+    assert occupied < len(stand.trees), "coarse cells should hide some stems"
+    # At a resolution that can actually resolve crowns, nothing is lost.
+    fine = synthesize(
+        SynthConfig(
+            width=60.0,
+            height=60.0,
+            cellsize=0.5,
+            stems_per_ha=300.0,
+            seed=4,
+            gap_count=0,
+            surface_noise=0.0,
+        )
+    )
+    assert sum(1 for value in fine.chm.values if value and value > 0) > len(fine.trees)

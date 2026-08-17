@@ -44,40 +44,49 @@ artefact of resolution:
 ```console
 $ silvispect gaps data/plot-a1-chm.asc --min-width 0
 3 gaps at or above 25 m2 and 0.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        511 m2  width  12.3 m  ...   <- one opening fused to the web
+  gap 1        511 m2  width  12.3 m  ...  [edge]   <- one opening fused to the web
 ```
 
 Silvispect applies the **Brokaw criterion**: a gap must be wide enough to
 contain a circle of a minimum diameter (5 m by default). It is implemented as a
-morphological opening of the sub-canopy mask — an erosion by the disc radius
-followed by a dilation of the same size — computed from a chamfer distance
-transform. The opening removes the web *including the tentacles attached to a
-genuine opening*, which a simple "discard small components" filter cannot do.
-Labelling then runs on the opened mask:
+morphological opening of the sub-canopy mask, which removes the web *including
+the tentacles attached to a genuine opening* — something a simple "discard small
+components" filter cannot do. Labelling then runs on the opened mask:
 
 ```console
 $ silvispect gaps data/plot-a1-chm.asc
 3 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        164 m2  width  12.3 m  ...   <- the opening alone
+  gap 1        152 m2  width  12.3 m  ...  [edge]   <- the opening alone
 ```
 
-The 511 m² blob and the 164 m² opening have the *same* inscribed width: the
-extra 347 m² is entirely tentacles of inter-crown ground, which is why a
-"discard narrow components" filter cannot remove it and an opening can.
+Both report the *same* inscribed width: the difference is entirely tentacles of
+inter-crown ground, which is why a "discard narrow components" filter cannot
+remove it and an opening can.
 
 Each gap reports its area, its **width** (the diameter of the largest inscribed
 circle), its equivalent radius, its centroid, and whether it touches the plot
 edge — an edge gap is truncated by the extent, so its area is a lower bound
 and Silvispect downgrades its severity accordingly.
 
+The opening is computed as an **opening function**: one pass records, for every
+cell, the radius of the largest disc that fits in the sub-canopy area and still
+covers that cell, and the mask is a threshold on that field. The obvious
+alternative — erode by the radius, then dilate by it — mixes two different
+quantisations, and the result is not monotone: on a treeless 10 m x 10 m plot
+the reported opening ran 64, 96, 64, 88, 60 cells as the requested width rose a
+metre at a time, so *tightening* `min_width` could enlarge a gap and raise a
+finding that a looser setting did not. A threshold on a single scalar field
+cannot behave that way — a larger radius always selects a subset.
+
 Two consequences of "as mapped" are worth stating plainly. The **plot edge is a
 boundary** for the inscribed circle: nothing is known beyond the extent, so a
 gap running off the side is measured only within it. Without that bound a
 10 m x 10 m plot with a single corner tree reported a 25 m gap width — larger
-than the raster's own diagonal. And because the morphological opening insets
-the mask, edge contact is judged by proximity to the border rather than by
-landing exactly on it; otherwise every edge gap would lose its flag to the
-erosion and be reported as a `critical` interior opening.
+than the raster's own diagonal. And because the opening insets the mask
+from the border, edge contact is inherited from the *untrimmed* sub-canopy
+component the gap was carved from: the trimmed remnant keeps no cell on the
+border, and proximity is not a usable stand-in, since an interior opening one
+tree-row from the edge is just as close.
 
 **Vertical strata** bin the canopy cells into ground / regeneration /
 understorey / midstorey / canopy / emergent layers, and **rugosity** is the

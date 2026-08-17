@@ -65,7 +65,7 @@ First release. Everything below is new.
   `inspect --fail-on <severity>` for use as a CI gate.
 - Seeded synthetic stand generator providing ground truth for the test suite
   and for `silvispect demo`.
-- 236 tests, ruff lint and format configuration, mypy, GitHub Actions CI across
+- 242 tests, ruff lint and format configuration, mypy, GitHub Actions CI across
   Python 3.10–3.13, and a committed sample plot whose reproducibility CI
   verifies.
 - CI builds both distributions, installs the wheel, checks the `py.typed`
@@ -76,8 +76,9 @@ First release. Everything below is new.
 
 ### Corrections before release
 
-Two rounds of independent review found nine behavioural defects before release.
-Each is fixed with a regression test that fails against the code as it stood.
+Three rounds of independent review found fifteen behavioural defects before
+release. Each is fixed with a regression test that fails against the code as it
+stood.
 
 First round — absent data was being turned into confident numbers:
 
@@ -123,6 +124,38 @@ the remaining halves:
 - `yield_basis_count` reached the JSON but not the text or Markdown reports, so
   the human-facing output could show a partial volume without its sample size.
 
-The changelog previously claimed the first five were "all fixed with regression
-tests". Three of them were only partly fixed, and the tests covered the
-reproductions rather than the general cases — hence this second round.
+Third round — a property check over random rasters found the gap filter was
+not monotone, plus four narrower issues:
+
+- **`min_gap_width` was not monotone.** Erosion followed by dilation mixes two
+  quantisations, and the opened area oscillated (64, 96, 64, 88, 60 cells on a
+  treeless 10 m plot as the width rose a metre at a time), so *tightening* the
+  criterion could enlarge a gap and raise SV011 where a looser setting did not.
+  Replaced by an opening function — one scalar field per cell, thresholded —
+  which is nested by construction. Verified against 800 random rasters.
+- Judging edge contact by proximity to the border, introduced in round two,
+  flagged interior openings a single tree-row from the edge. Edge contact is
+  now inherited from the untrimmed sub-canopy component, which is exact.
+- An inventory with a header and no rows was treated as no inventory at all by
+  `inspect` and as a counted empty stand by `metrics`. It is data either way:
+  somebody counted and found nothing. All paths now agree on
+  `metrics_source: field` with a count of zero.
+- Non-finite numbers were rejected in threshold profiles but accepted from
+  rasters, inventories and CLI options, where they produced tracebacks, exit 1,
+  or `NaN` in JSON. Every input surface now rejects them with exit 2 — as does
+  `inspect` with no arguments, which previously exited 1, the code reserved for
+  findings.
+- The synthetic generator's contract claimed the returned trees were exactly
+  the stems rendered into the canopy model. The surface keeps the maximum over
+  overlapping crowns, so a shorter neighbour can be painted and then hidden —
+  which is what a real canopy model does. The claim is corrected rather than
+  the code, and a test pins the behaviour at both coarse and fine resolutions.
+- The CI check that `py.typed` ships was importing the checkout rather than the
+  installed wheel, so it would have passed with the marker missing from the
+  wheel. It now runs from a neutral directory and asserts the import resolved
+  to site-packages.
+
+The changelog previously claimed the first five defects were "all fixed with
+regression tests". Three were only partly fixed, and the tests pinned the
+reproductions rather than the general cases — which is how rounds two and three
+happened. Where a general property exists, it is now tested as one.

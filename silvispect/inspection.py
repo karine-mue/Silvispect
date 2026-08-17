@@ -134,6 +134,12 @@ class InspectionConfig:
         A profile is user input, so it is validated at the boundary rather than
         being allowed to surface later as a traceback from deep inside a fit.
         """
+        if isinstance(self.min_allometry_points, bool) or (
+            self.min_allometry_points != int(self.min_allometry_points)
+        ):
+            raise ValueError(
+                f"min_allometry_points must be a whole number, got {self.min_allometry_points!r}"
+            )
         if self.min_allometry_points < 1:
             raise ValueError("min_allometry_points must be at least 1")
         for name, value in asdict(self).items():
@@ -212,7 +218,8 @@ class InspectionContext:
 
     @property
     def has_field_data(self) -> bool:
-        return bool(self.field_trees)
+        """Whether a field inventory was supplied, even an empty one."""
+        return self.field_trees is not None
 
     @property
     def has_stem_source(self) -> bool:
@@ -222,7 +229,7 @@ class InspectionContext:
         stand then has *unknown* stocking, not zero stocking, so the stem-based
         rules must stay quiet instead of reporting an empty forest.
         """
-        return self.detection is not None or self.has_field_data
+        return self.detection is not None or self.field_trees is not None
 
     @property
     def has_raster(self) -> bool:
@@ -712,7 +719,7 @@ def inspect_stand(
         ValueError: If neither a raster nor a tree list is supplied, or if the
             plot area cannot be determined.
     """
-    if chm is None and not trees:
+    if chm is None and trees is None:
         raise ValueError("inspect_stand needs a canopy height model, trees, or both")
     config = config or InspectionConfig()
 
@@ -733,11 +740,13 @@ def inspect_stand(
             min_width=config.min_gap_width,
         )
 
-    field_trees = list(trees) if trees else None
+    # An inventory with no rows is still an inventory: somebody counted and
+    # found nothing.  Only a missing inventory is missing data.
+    field_trees = None if trees is None else list(trees)
     model: FittedModel | None = None
     species_models: dict[str, FittedModel] = {}
     fitted = False
-    if field_trees:
+    if field_trees:  # fitting needs actual measurements, not just a header row
         species_models = fit_by_species(
             field_trees, model=allometry_model, min_points=config.min_allometry_points
         )
@@ -746,15 +755,15 @@ def inspect_stand(
     elif detection is not None:
         model = default_model("")
 
-    if field_trees:
+    if field_trees is not None:
         analysis_trees = field_trees
         source = "field"
     elif detection is not None:
         analysis_trees = trees_from_crowns(detection.crowns, dbh_model=model)
         source = "detected"
     else:
-        # Only a raster, with detection switched off: there is no stem
-        # information at all, and the metrics below describe an empty list.
+        # Only a raster, with detection switched off: nothing looked for stems,
+        # so the summary below records that the stocking is unknown.
         analysis_trees = []
         source = "none"
 
@@ -764,7 +773,7 @@ def inspect_stand(
         else stand_metrics(analysis_trees, area_ha)
     )
     match: MatchResult | None = None
-    if detection is not None and field_trees:
+    if detection is not None and field_trees is not None:
         match = match_trees(detection.crowns, field_trees, tolerance=config.match_tolerance_m)
 
     ctx = InspectionContext(

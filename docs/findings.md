@@ -74,8 +74,12 @@ an inflated DTM lowers every CHM cell at once.
 A single opening exceeds `max_gap_area` (default 400 m²). Gaps are found by
 morphological opening with a `min_gap_width` disc (default 5 m), so slivers of
 inter-crown ground are already excluded — a finding here is a real opening.
-Gaps touching the plot boundary are truncated by the extent, so their area is a
-lower bound and their severity is reduced to `warning`.
+
+Raising `min_gap_width` can only ever shrink the openings reported, never grow
+them, so tightening the criterion cannot conjure this finding into existence.
+Gaps whose *untrimmed* sub-canopy area reaches the plot boundary are truncated
+by the extent, so their area is a lower bound and their severity is reduced to
+`warning`.
 
 ### SV012 High open-canopy fraction — `notice`
 More than `max_gap_fraction` (default 0.30) of the plot is below the canopy
@@ -191,7 +195,8 @@ A profile is validated when it loads, and anything unusable is rejected with
 exit status `2` rather than surfacing later as a traceback:
 
 - unknown keys, so a typo fails loudly instead of leaving a default in place;
-- non-numeric or non-object payloads;
+- non-numeric or non-object payloads, and non-finite numbers;
+- fractional counts, rather than truncating `1.9` to `1` without a word;
 - negative thresholds, and proportions outside `[0, 1]`;
 - `min_allometry_points` below 1;
 - contradictory pairs such as `min_stems_per_ha` above `max_stems_per_ha`,

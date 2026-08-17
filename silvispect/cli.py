@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections.abc import Sequence
@@ -31,6 +32,22 @@ EXIT_FINDINGS = 1
 EXIT_ERROR = 2
 
 
+def finite(text: str) -> float:
+    """An argparse type for options that must be a real number.
+
+    ``nan`` and ``inf`` parse happily as floats and then travel silently into
+    comparisons that are always false, or into JSON that no strict parser will
+    read back.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a finite number")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="silvispect",
@@ -47,10 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     detect = subparsers.add_parser("detect", help="detect trees and delineate crowns")
     detect.add_argument("chm", type=Path, help="canopy height model (.asc)")
-    detect.add_argument("--min-height", type=float, default=2.0, help="minimum tree height")
+    detect.add_argument("--min-height", type=finite, default=2.0, help="minimum tree height")
     detect.add_argument("--smooth-radius", type=int, default=1, help="pre-smoothing radius")
-    detect.add_argument("--window-intercept", type=float, default=0.8)
-    detect.add_argument("--window-slope", type=float, default=0.055)
+    detect.add_argument("--window-intercept", type=finite, default=0.8)
+    detect.add_argument("--window-slope", type=finite, default=0.055)
     detect.add_argument("-o", "--output", type=Path, help="write detected trees as CSV")
     detect.add_argument("--labels", type=Path, help="write the crown label raster here")
     detect.add_argument("--json", action="store_true", help="emit JSON instead of text")
@@ -58,17 +75,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     metrics = subparsers.add_parser("metrics", help="summarise an inventory")
     metrics.add_argument("inventory", type=Path, help="tree list (.csv)")
-    metrics.add_argument("--area-ha", type=float, required=True, help="plot area in hectares")
+    metrics.add_argument("--area-ha", type=finite, required=True, help="plot area in hectares")
     metrics.add_argument("--include-dead", action="store_true", help="keep non-live stems")
     metrics.add_argument("--json", action="store_true")
     metrics.set_defaults(handler=_cmd_metrics)
 
     gaps = subparsers.add_parser("gaps", help="map canopy openings")
     gaps.add_argument("chm", type=Path)
-    gaps.add_argument("--threshold", type=float, default=2.0, help="canopy height threshold")
-    gaps.add_argument("--min-area", type=float, default=25.0, help="smallest reported gap")
+    gaps.add_argument("--threshold", type=finite, default=2.0, help="canopy height threshold")
+    gaps.add_argument("--min-area", type=finite, default=25.0, help="smallest reported gap")
     gaps.add_argument(
-        "--min-width", type=float, default=5.0, help="narrowest reported gap (Brokaw criterion)"
+        "--min-width", type=finite, default=5.0, help="narrowest reported gap (Brokaw criterion)"
     )
     gaps.add_argument("--json", action="store_true")
     gaps.set_defaults(handler=_cmd_gaps)
@@ -82,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     match = subparsers.add_parser("match", help="compare detections with field trees")
     match.add_argument("inventory", type=Path, help="field tree list (.csv)")
     match.add_argument("--chm", required=True, type=Path, help="canopy height model (.asc)")
-    match.add_argument("--tolerance", type=float, default=2.5, help="matching radius in metres")
+    match.add_argument("--tolerance", type=finite, default=2.5, help="matching radius in metres")
     match.add_argument("--json", action="store_true")
     match.set_defaults(handler=_cmd_match)
 
@@ -95,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_cmd = subparsers.add_parser("inspect", help="run the inspection rules")
     inspect_cmd.add_argument("--chm", type=Path, help="canopy height model (.asc)")
     inspect_cmd.add_argument("--inventory", type=Path, help="field tree list (.csv)")
-    inspect_cmd.add_argument("--area-ha", type=float, help="plot area, defaults to the raster")
+    inspect_cmd.add_argument("--area-ha", type=finite, help="plot area, defaults to the raster")
     inspect_cmd.add_argument("--config", type=Path, help="threshold overrides (.json)")
     inspect_cmd.add_argument(
         "--format", default="text", choices=("text", "markdown", "json"), help="output format"
@@ -114,10 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
     synth = subparsers.add_parser("synth", help="generate a synthetic stand")
     synth.add_argument("--out", type=Path, default=Path("stand"), help="output directory")
     synth.add_argument("--seed", type=int, default=SynthConfig.seed)
-    synth.add_argument("--width", type=float, default=SynthConfig.width)
-    synth.add_argument("--height", type=float, default=SynthConfig.height)
-    synth.add_argument("--cellsize", type=float, default=SynthConfig.cellsize)
-    synth.add_argument("--stems-per-ha", type=float, default=SynthConfig.stems_per_ha)
+    synth.add_argument("--width", type=finite, default=SynthConfig.width)
+    synth.add_argument("--height", type=finite, default=SynthConfig.height)
+    synth.add_argument("--cellsize", type=finite, default=SynthConfig.cellsize)
+    synth.add_argument("--stems-per-ha", type=finite, default=SynthConfig.stems_per_ha)
     synth.add_argument("--gaps", type=int, default=SynthConfig.gap_count)
     synth.set_defaults(handler=_cmd_synth)
 
@@ -272,7 +289,8 @@ def _cmd_allometry(args: argparse.Namespace, out) -> int:
 
 def _cmd_inspect(args: argparse.Namespace, out) -> int:
     if not args.chm and not args.inventory:
-        raise SystemExit("inspect needs --chm, --inventory, or both")
+        print("silvispect: inspect needs --chm, --inventory, or both", file=sys.stderr)
+        return EXIT_ERROR
     chm = Grid.read(args.chm) if args.chm else None
     trees = read_trees(args.inventory) if args.inventory else None
     config = InspectionConfig.load(args.config) if args.config else InspectionConfig()
@@ -349,7 +367,7 @@ def main(argv: Sequence[str] | None = None, *, out=None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args, out)
-    except (GridError, InventoryError, AllometryError, ValueError, TypeError) as exc:
+    except (GridError, InventoryError, AllometryError, ValueError, TypeError, OverflowError) as exc:
         print(f"silvispect: {exc}", file=sys.stderr)
         return EXIT_ERROR
     except FileNotFoundError as exc:

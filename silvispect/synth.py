@@ -94,8 +94,8 @@ class SynthConfig:
 
         A raster holds a whole number of cells, so a requested extent that is
         not a multiple of the cell size is rounded.  Stems are drawn inside
-        *this* extent rather than the requested one, so that every generated
-        tree is actually rendered into the canopy model.
+        *this* extent rather than the requested one, so that no generated tree
+        lands outside the raster describing it.
         """
         nrows, ncols = self.shape
         return (ncols * self.cellsize, nrows * self.cellsize)
@@ -132,8 +132,13 @@ def synthesize(config: SynthConfig | None = None, **overrides) -> SyntheticStand
         **overrides: Field overrides applied on top of ``config``.
 
     Returns:
-        A :class:`SyntheticStand` whose ``trees`` are exactly the stems that
-        were rendered into the canopy height model.
+        A :class:`SyntheticStand` whose ``trees`` are the stems painted onto the
+        canopy surface.  Each one reaches at least its own cell, but the surface
+        keeps the *maximum* over overlapping crowns, so a shorter neighbour can
+        end up completely hidden by a taller one — heavily so on coarse rasters,
+        where many stems share a cell.  That is what a real canopy height model
+        does too, and it is why detection recall is bounded by the sensor rather
+        than by the detector.
     """
     if config is None:
         config = SynthConfig(**overrides)

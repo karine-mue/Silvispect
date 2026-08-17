@@ -15,6 +15,7 @@ test:
 lint:
 	ruff check .
 	ruff format --check .
+	mypy silvispect
 
 format:
 	ruff format .

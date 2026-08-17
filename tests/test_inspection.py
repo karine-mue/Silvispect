@@ -402,3 +402,23 @@ def test_config_rejects_non_finite_and_fractional_counts():
         InspectionConfig(max_gap_area=float("inf"))
     # A whole number expressed as a float is still a whole number.
     assert InspectionConfig.from_dict({"min_allometry_points": 4.0}).min_allometry_points == 4
+
+
+def test_an_empty_inventory_is_data_not_absence_of_data():
+    """Somebody counted and found nothing — that is a measurement."""
+    report = inspect_stand(trees=[], area_ha=1.0)
+    assert report.metrics_source == "field"
+    assert report.metrics.tree_count == 0
+    assert report.metrics.stems_per_ha == 0.0
+    assert "SV001" in codes(report)
+
+
+def test_an_empty_inventory_wins_over_detection_as_the_source():
+    report = inspect_stand(chm=flat_canopy(), trees=[])
+    assert report.metrics_source == "field"
+    assert report.metrics.tree_count == 0
+
+
+def test_missing_inventory_is_still_missing():
+    with pytest.raises(ValueError, match="needs a canopy height model"):
+        inspect_stand()

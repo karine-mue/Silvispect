@@ -86,8 +86,10 @@ jobs:
           python -m pip install dist/*.whl
           silvispect --version
           silvispect demo > /dev/null
-          python -c "import importlib.resources as r; \
-                     assert (r.files('silvispect') / 'py.typed').is_file(), 'missing py.typed'"
+          # From a neutral directory, so the checkout does not shadow the wheel.
+          cd /tmp && python -c "import silvispect, importlib.resources as r; \
+              assert 'site-packages' in silvispect.__file__, silvispect.__file__; \
+              assert (r.files('silvispect') / 'py.typed').is_file(), 'missing py.typed'"
 
       - name: Run the suite from the unpacked source distribution
         run: |

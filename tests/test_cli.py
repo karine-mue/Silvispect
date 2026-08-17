@@ -161,8 +161,9 @@ def test_inspect_inventory_only_requires_area(workspace):
 
 
 def test_inspect_needs_an_input():
-    with pytest.raises(SystemExit):
-        main(["inspect"])
+    """Calling inspect with nothing is bad input, so exit 2 like every other."""
+    code, _ = run("inspect")
+    assert code == EXIT_ERROR
 
 
 def test_inspect_fail_on_severity(workspace):
