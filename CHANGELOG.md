@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] — 2026-08-17
+## 0.1.0 — 2026-08-17
 
 First release. Everything below is new.
 
@@ -92,5 +92,3 @@ defects, all fixed here with regression tests:
   rendering the *rounded* raster, so a non-divisible extent returned ground-truth
   trees that were never rendered. Stems are now drawn inside the realised
   raster.
-
-[0.1.0]: https://github.com/karine-mue/Silvispect/releases/tag/v0.1.0
