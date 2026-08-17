@@ -195,6 +195,7 @@ Rules are plain functions registered with a decorator:
 ```python
 from silvispect.inspection import Finding, InspectionContext, Severity, rule
 
+
 @rule
 def check_veteran_trees(ctx: InspectionContext):
     """SV060 — no large-diameter habitat trees retained."""

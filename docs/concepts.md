@@ -16,6 +16,7 @@ Three rasters describe a stand vertically.
 
 ```python
 from silvispect.canopy import canopy_height_model
+
 chm = canopy_height_model(dsm, dtm)
 ```
 
