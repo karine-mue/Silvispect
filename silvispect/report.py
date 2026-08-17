@@ -154,14 +154,14 @@ def render_markdown(
     counts = report.counts()
     parts: list[str] = [f"# {title}", ""]
     parts.append(
-        f"Inspected **{metrics.tree_count} trees** over **{report.area_ha:.3f} ha** "
+        f"Inspected **{_num(metrics.tree_count)} trees** over **{report.area_ha:.3f} ha** "
         f"using {_source_label(report.metrics_source)}. "
         f"Highest severity: **{report.max_severity.label}** "
         f"({len(report.findings)} findings: "
         + ", ".join(f"{count} {name}" for name, count in counts.items() if count)
         + ")."
         if report.findings
-        else f"Inspected **{metrics.tree_count} trees** over "
+        else f"Inspected **{_num(metrics.tree_count)} trees** over "
         f"**{report.area_ha:.3f} ha** using {_source_label(report.metrics_source)}. "
         "No findings."
     )
@@ -197,6 +197,7 @@ def render_markdown(
                 ("Maximum height (m)", metrics.max_height_m),
                 ("Volume (m3/ha)", metrics.volume_per_ha_m3),
                 ("Above-ground biomass (t/ha)", metrics.biomass_per_ha_t),
+                ("Stems behind volume and biomass", metrics.yield_basis_count),
             ],
         )
     )
@@ -356,8 +357,9 @@ def render_text(report: InspectionReport) -> str:
         "Silvispect inspection",
         "=" * 21,
         f"area              {report.area_ha:.3f} ha ({_source_label(report.metrics_source)})",
-        f"trees             {metrics.tree_count}",
-        f"stems/ha          {metrics.stems_per_ha:.0f}",
+        f"trees             {_num(metrics.tree_count)}",
+        f"stems/ha          {_num(metrics.stems_per_ha)}",
+        f"yield basis       {_num(metrics.yield_basis_count)} stems",
         f"basal area/ha     {_fmt(metrics.basal_area_per_ha)} m2",
         f"qmd               {_fmt(metrics.quadratic_mean_diameter_cm)} cm",
         f"lorey height      {_fmt(metrics.lorey_height_m)} m",
@@ -394,6 +396,15 @@ def render_json(report: InspectionReport, *, indent: int = 2) -> str:
     producing a document a consumer cannot read.
     """
     return json.dumps(report.as_dict(), indent=indent, sort_keys=False, allow_nan=False) + "\n"
+
+
+def _num(value: object, spec: str = "{:,.0f}") -> str:
+    """Format a number with an explicit spec, or a dash when it is absent."""
+    if value is None:
+        return "-"
+    if isinstance(value, (int, float)):
+        return spec.format(value)
+    return str(value)
 
 
 def _source_label(source: str) -> str:

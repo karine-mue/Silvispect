@@ -156,29 +156,35 @@ def _distance_to_outside(chm: Grid) -> list[float]:
 
 
 def _canopy_distance_field(chm: Grid, threshold: float) -> list[float]:
-    """Distance from every cell to the nearest canopy cell, in map units.
+    """Distance from every cell to the nearest canopy cell or plot edge.
 
-    When the raster holds no canopy at all there is no source to measure from,
-    and an unbounded search would give every cell an infinite distance — which
-    a gap would then report as an infinite width, and JSON cannot represent.
-    The plot edge is the only boundary such a stand has, so distances are
-    measured from outside the grid instead: finite, and true to what is known.
+    **The plot edge counts as a boundary.**  Measuring only to canopy would let
+    an opening that runs off the side of the raster claim an inscribed circle
+    larger than the raster itself — a 10 m x 10 m plot with one corner tree
+    reported a 25 m gap width, which no circle inside it could have.  Nothing is
+    known about the forest beyond the extent, so the honest bound is the extent:
+    the reported width describes the opening *as mapped*, and ``touches_edge``
+    marks it as possibly continuing further.
+
+    Taking the minimum against the edge distance also covers a raster with no
+    canopy at all, where the chamfer search alone would leave every cell at
+    infinity — and JSON has no way to write that down.
     """
     seeds = [
         position for position, value in enumerate(chm.values) if value is None or value >= threshold
     ]
-    if not seeds:
-        return _distance_to_outside(chm)
-    return _chamfer(chm, seeds)
+    to_canopy = _chamfer(chm, seeds)
+    to_outside = _distance_to_outside(chm)
+    return [min(canopy, outside) for canopy, outside in zip(to_canopy, to_outside, strict=True)]
 
 
 def distance_to_canopy(chm: Grid, *, threshold: float = 2.0) -> Grid:
-    """Distance from every cell to the nearest canopy cell, in map units.
+    """Distance from every cell to the nearest canopy cell or plot edge.
 
     Cells at or above ``threshold`` are the sources and get distance zero.
     Cells with no data are treated as unknown rather than as openings, so they
-    are sources too.  A raster with no canopy anywhere measures from the plot
-    edge instead — see :func:`_canopy_distance_field`.
+    are sources too.  The plot edge bounds the result — see
+    :func:`_canopy_distance_field` for why.
     """
     out = chm.like()
     for position, distance in enumerate(_canopy_distance_field(chm, threshold)):
@@ -254,6 +260,13 @@ def find_gaps(
         mask = [value is not None and value < threshold for value in chm.values]
         to_canopy = _canopy_distance_field(chm, threshold)
 
+    # Morphological opening insets the mask from the border, so a gap that
+    # genuinely runs off the plot no longer has a cell *on* the border.  Judge
+    # edge contact by proximity to the outside instead, using the same radius
+    # the opening ate away; with no opening this reduces to "is a border cell".
+    to_outside = _distance_to_outside(chm)
+    edge_reach = (min_width / 2.0) + chm.cellsize / 2.0
+
     seen = [False] * len(chm.values)
     gaps: list[CanopyGap] = []
     next_id = 1
@@ -265,15 +278,12 @@ def find_gaps(
         seen[start] = True
         members: list[tuple[int, int]] = []
         heights: list[float] = []
-        touches_edge = False
         while queue:
             r, c = queue.popleft()
             members.append((r, c))
             value = chm.values[r * chm.ncols + c]
-            assert value is not None  # the mask only covers valid cells
-            heights.append(value)
-            if r in (0, chm.nrows - 1) or c in (0, chm.ncols - 1):
-                touches_edge = True
+            if value is not None:  # the mask only covers valid cells
+                heights.append(value)
             for nr, nc in chm.neighbors(r, c, connectivity):
                 idx = nr * chm.ncols + nc
                 if seen[idx] or not mask[idx]:
@@ -283,6 +293,7 @@ def find_gaps(
         area = len(members) * chm.cell_area
         if area < min_area:
             continue
+        touches_edge = min(to_outside[r * chm.ncols + c] for r, c in members) <= edge_reach
         if touches_edge and not include_edge_gaps:
             continue
         inscribed = max(to_canopy[r * chm.ncols + c] for r, c in members)

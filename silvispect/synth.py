@@ -258,6 +258,13 @@ def _render_crown(canopy: Grid, tree: Tree, config: SynthConfig) -> None:
     height = tree.height_m or 0.0
     if radius <= 0 or height <= 0:
         return
+    # A crown narrower than the cell it stands in can fall entirely between cell
+    # centres and paint nothing, which would leave a ground-truth stem with no
+    # trace in the raster it is supposed to describe.  Floor the painting radius
+    # just above the half-diagonal of a cell so every tree reaches its own cell
+    # centre.  At the resolutions this generator is normally used at, every
+    # crown is already wider than this and the floor never binds.
+    radius = max(radius, 0.75 * canopy.cellsize)
     cell = canopy.cell_of(tree.x, tree.y)
     if cell is None:
         return

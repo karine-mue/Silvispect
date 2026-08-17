@@ -57,7 +57,7 @@ Labelling then runs on the opened mask:
 
 ```console
 $ silvispect gaps data/plot-a1-chm.asc
-4 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
+3 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
   gap 1        164 m2  width  12.3 m  ...   <- the opening alone
 ```
 
@@ -69,6 +69,15 @@ Each gap reports its area, its **width** (the diameter of the largest inscribed
 circle), its equivalent radius, its centroid, and whether it touches the plot
 edge — an edge gap is truncated by the extent, so its area is a lower bound
 and Silvispect downgrades its severity accordingly.
+
+Two consequences of "as mapped" are worth stating plainly. The **plot edge is a
+boundary** for the inscribed circle: nothing is known beyond the extent, so a
+gap running off the side is measured only within it. Without that bound a
+10 m x 10 m plot with a single corner tree reported a 25 m gap width — larger
+than the raster's own diagonal. And because the morphological opening insets
+the mask, edge contact is judged by proximity to the border rather than by
+landing exactly on it; otherwise every edge gap would lose its flag to the
+erosion and be reported as a `critical` interior opening.
 
 **Vertical strata** bin the canopy cells into ground / regeneration /
 understorey / midstorey / canopy / emergent layers, and **rugosity** is the
@@ -223,9 +232,12 @@ are known exactly. `silvispect.synth` generates one from a seed:
 
 A raster holds a whole number of cells, so a requested extent that is not a
 multiple of the cell size is rounded; stems are then drawn inside the *realised*
-extent, and `SyntheticStand.area_ha` reports the raster's own area. That keeps
-the guarantee the generator exists for: the returned trees are exactly the stems
-rendered into the canopy model.
+extent, and `SyntheticStand.area_ha` reports the raster's own area. The painting
+radius is also floored just above a cell's half-diagonal, so a crown narrower
+than its own cell still reaches that cell's centre instead of falling between
+sample points. Together these keep the guarantee the generator exists for: the
+returned trees are exactly the stems rendered into the canopy model. At normal
+resolutions neither adjustment binds.
 
 The same seed always produces the same stand, byte for byte, which is what
 makes the accuracy assertions in the test suite meaningful rather than

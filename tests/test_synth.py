@@ -141,3 +141,33 @@ def test_every_generated_tree_is_inside_the_raster():
 def test_reported_area_follows_the_raster_not_the_request():
     stand = synthesize(SynthConfig(width=14.0, height=100.0, cellsize=10.0, seed=1))
     assert stand.area_ha == pytest.approx(0.1)
+
+
+def test_every_truth_tree_paints_a_cell_even_on_coarse_rasters():
+    """Ground truth is only ground truth if it is visible in the raster."""
+    from silvispect.grid import Grid
+    from silvispect.synth import _render_crown
+
+    stand = synthesize(
+        SynthConfig(
+            width=14.0,
+            height=100.0,
+            cellsize=10.0,
+            stems_per_ha=300.0,
+            seed=4,
+            gap_count=0,
+            surface_noise=0.0,
+        )
+    )
+    assert stand.trees
+    for tree in stand.trees:
+        probe = Grid.filled(
+            stand.chm.nrows,
+            stand.chm.ncols,
+            0.0,
+            cellsize=stand.chm.cellsize,
+            xllcorner=stand.chm.xllcorner,
+            yllcorner=stand.chm.yllcorner,
+        )
+        _render_crown(probe, tree, stand.config)
+        assert any(value for value in probe.values), f"{tree.tree_id} painted nothing"

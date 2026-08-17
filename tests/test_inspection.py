@@ -365,3 +365,40 @@ def test_inspection_survives_an_inventory_without_heights():
     assert report.allometry["fitted"] is False
     assert report.metrics.volume_per_ha_m3 is None
     assert "SV040" in codes(report)
+
+
+def test_uncounted_stand_reports_unknown_rather_than_zero():
+    """metrics_source "none" must not publish a confident zero stocking."""
+    report = inspect_stand(chm=flat_canopy(), run_detection=False)
+    assert report.metrics_source == "none"
+    for value in (
+        report.metrics.tree_count,
+        report.metrics.measured_count,
+        report.metrics.yield_basis_count,
+        report.metrics.stems_per_ha,
+    ):
+        assert value is None
+    payload = report.as_dict()["metrics"]
+    assert payload["tree_count"] is None
+    assert payload["stems_per_ha"] is None
+
+
+def test_counted_empty_stand_still_reports_zero():
+    """Having counted and found nothing is a measurement, and stays numeric."""
+    report = inspect_stand(chm=flat_canopy(0.0), run_detection=True)
+    assert report.metrics_source == "detected"
+    assert report.metrics.tree_count == 0
+    assert report.metrics.stems_per_ha == 0.0
+
+
+def test_config_rejects_non_finite_and_fractional_counts():
+    with pytest.raises(ValueError, match="finite"):
+        InspectionConfig.from_dict({"max_gap_area": float("inf")})
+    with pytest.raises(ValueError, match="finite"):
+        InspectionConfig.from_dict({"min_allometry_points": float("inf")})
+    with pytest.raises(ValueError, match="whole number"):
+        InspectionConfig.from_dict({"min_allometry_points": 1.9})
+    with pytest.raises(ValueError, match="finite"):
+        InspectionConfig(max_gap_area=float("inf"))
+    # A whole number expressed as a float is still a whole number.
+    assert InspectionConfig.from_dict({"min_allometry_points": 4.0}).min_allometry_points == 4

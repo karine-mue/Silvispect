@@ -200,12 +200,14 @@ class StandMetrics:
     """A complete stand summary for one plot."""
 
     area_ha: float
-    tree_count: int
-    measured_count: int
+    #: Stems considered.  ``None`` means nothing counted stems at all, which is
+    #: different from having counted and found none.
+    tree_count: int | None
+    measured_count: int | None
     #: Stems carrying both a diameter and a height, the basis of the volume and
     #: biomass totals.  Lower than ``measured_count`` when heights are missing.
-    yield_basis_count: int
-    stems_per_ha: float
+    yield_basis_count: int | None
+    stems_per_ha: float | None
     basal_area_per_ha: float | None
     quadratic_mean_diameter_cm: float | None
     mean_diameter_cm: float | None
@@ -228,7 +230,7 @@ class StandMetrics:
             "tree_count": self.tree_count,
             "measured_count": self.measured_count,
             "yield_basis_count": self.yield_basis_count,
-            "stems_per_ha": round(self.stems_per_ha, 2),
+            "stems_per_ha": _round(self.stems_per_ha, 2),
             "basal_area_per_ha_m2": _round(self.basal_area_per_ha, 3),
             "qmd_cm": _round(self.quadratic_mean_diameter_cm, 2),
             "mean_dbh_cm": _round(self.mean_diameter_cm, 2),
@@ -245,6 +247,37 @@ class StandMetrics:
             "species_shares": {k: round(v, 4) for k, v in self.species_shares.items()},
             "diameter_classes": dict(self.diameter_classes),
         }
+
+    @classmethod
+    def unknown(cls, area_ha: float) -> StandMetrics:
+        """A summary for a plot where nothing counted stems.
+
+        Every stem-derived figure is ``None`` rather than ``0``: an uncounted
+        stand has an unknown stocking, and a zero would be indistinguishable
+        from a stand that was counted and found empty.
+        """
+        if area_ha <= 0:
+            raise MetricsError("area_ha must be positive")
+        return cls(
+            area_ha=area_ha,
+            tree_count=None,
+            measured_count=None,
+            yield_basis_count=None,
+            stems_per_ha=None,
+            basal_area_per_ha=None,
+            quadratic_mean_diameter_cm=None,
+            mean_diameter_cm=None,
+            mean_height_m=None,
+            lorey_height_m=None,
+            dominant_height_m=None,
+            max_height_m=None,
+            sdi=None,
+            gini_basal_area=None,
+            shannon=None,
+            simpson=None,
+            volume_per_ha_m3=None,
+            biomass_per_ha_t=None,
+        )
 
 
 def stand_metrics(

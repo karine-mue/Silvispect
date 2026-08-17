@@ -42,7 +42,7 @@ silvispect = "silvispect.cli:main"
 # ruff is pinned to a minor series: it is a formatter as well as a linter,
 # and formatting rules change between minor releases, which would otherwise
 # turn an unrelated ruff release into a red CI run.
-dev = ["pytest>=7", "ruff>=0.16.3,<0.17"]
+dev = ["pytest>=7", "ruff>=0.16.3,<0.17", "mypy>=1.11"]
 
 [tool.setuptools]
 packages = ["silvispect"]

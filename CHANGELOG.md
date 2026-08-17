@@ -65,16 +65,21 @@ First release. Everything below is new.
   `inspect --fail-on <severity>` for use as a CI gate.
 - Seeded synthetic stand generator providing ground truth for the test suite
   and for `silvispect demo`.
-- 227 tests, ruff lint and format configuration, GitHub Actions CI across
+- 236 tests, ruff lint and format configuration, mypy, GitHub Actions CI across
   Python 3.10–3.13, and a committed sample plot whose reproducibility CI
   verifies.
+- CI builds both distributions, installs the wheel, checks the `py.typed`
+  marker ships, and runs the whole suite from the unpacked source
+  distribution — the packaging claims are enforced, not asserted.
 - PEP 561 `py.typed` marker, and a source distribution that carries the test
   fixtures the shipped tests need.
 
 ### Corrections before release
 
-An independent review of the first pushed commit found five behavioural
-defects, all fixed here with regression tests:
+Two rounds of independent review found nine behavioural defects before release.
+Each is fixed with a regression test that fails against the code as it stood.
+
+First round — absent data was being turned into confident numbers:
 
 - Volume and biomass totals reported `0` for a stand with diameters but no
   heights. They are now absent, and `yield_basis_count` exposes how many stems
@@ -92,3 +97,32 @@ defects, all fixed here with regression tests:
   rendering the *rounded* raster, so a non-divisible extent returned ground-truth
   trees that were never rendered. Stems are now drawn inside the realised
   raster.
+
+Second round — three of those fixes were incomplete, and the re-review found
+the remaining halves:
+
+- The gap-width fix only covered rasters with *no* canopy. Wherever any canopy
+  existed the plot edge was still ignored, so an opening running off the side
+  could claim an inscribed circle larger than the raster: a 10 m x 10 m plot
+  with one corner tree reported a 25 m width. The distance field is now bounded
+  by the extent in every case, which subsumes the no-canopy special case.
+- Because the morphological opening insets the mask from the border, an
+  edge-touching gap lost its `touches_edge` flag to the erosion and was rated
+  `critical` instead of `warning`. Edge contact is now judged by proximity to
+  the border, using the same radius the opening removed.
+- Drawing stems inside the realised raster was not enough to make every
+  ground-truth tree visible: a crown narrower than its own cell fell between
+  cell centres and painted nothing, so 23 of 30 truth trees left no trace at a
+  10 m cell size. The painting radius now has a half-diagonal floor.
+- `metrics_source: none` still published `tree_count: 0` and
+  `stems_per_ha: 0.0`, which is the same "unknown becomes zero" mistake one
+  layer further out. Those figures are now `null`, via `StandMetrics.unknown`.
+- Threshold validation rejected ordinary bad values but not infinities
+  (`1e999` raised an uncaught `OverflowError`) or fractional counts (`1.9` was
+  silently truncated to `1`). Both are now rejected with exit status `2`.
+- `yield_basis_count` reached the JSON but not the text or Markdown reports, so
+  the human-facing output could show a partial volume without its sample size.
+
+The changelog previously claimed the first five were "all fixed with regression
+tests". Three of them were only partly fixed, and the tests covered the
+reproductions rather than the general cases — hence this second round.

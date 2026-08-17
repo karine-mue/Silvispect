@@ -125,12 +125,23 @@ def test_synthetic_stand_has_realistic_cover(stand):
     assert stand.chm.stats().maximum > 15.0
 
 
-def test_distance_to_canopy_is_zero_at_canopy_cells():
-    rows = [[10.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-    distances = distance_to_canopy(Grid.from_rows(rows, cellsize=1.0), threshold=2.0)
-    assert distances.get(0, 0) == 0.0
-    assert distances.get(0, 1) == pytest.approx(1.0)
-    assert distances.get(1, 1) == pytest.approx(math.sqrt(2.0))
+def test_distance_to_canopy_measures_to_the_nearest_tree():
+    chm = Grid.filled(7, 7, 0.0, cellsize=1.0)
+    chm.set(3, 3, 10.0)
+    distances = distance_to_canopy(chm, threshold=2.0)
+    assert distances.get(3, 3) == 0.0
+    assert distances.get(3, 4) == pytest.approx(1.0)
+    assert distances.get(2, 2) == pytest.approx(math.sqrt(2.0))
+
+
+def test_distance_to_canopy_is_bounded_by_the_plot_edge():
+    """Nothing is known beyond the extent, so the edge is a boundary too."""
+    chm = Grid.filled(7, 7, 0.0, cellsize=1.0)
+    chm.set(3, 3, 10.0)
+    distances = distance_to_canopy(chm, threshold=2.0)
+    # The corner is 4.24 m from the only tree but half a cell from the edge.
+    assert distances.get(0, 0) == pytest.approx(0.5)
+    assert max(v for v in distances.values if v is not None) <= 3.5
 
 
 def test_treeless_raster_reports_a_finite_gap_width():
@@ -148,3 +159,27 @@ def test_treeless_raster_reports_a_finite_gap_width():
 def test_treeless_raster_distance_field_is_finite():
     distances = distance_to_canopy(Grid.filled(6, 6, 0.0, cellsize=1.0), threshold=2.0)
     assert all(value is not None and math.isfinite(value) for value in distances.values)
+
+
+def test_gap_width_cannot_exceed_the_raster():
+    """An inscribed circle must fit inside the plot that was actually mapped."""
+    chm = Grid.filled(10, 10, 0.0, cellsize=1.0)
+    chm.set(0, 0, 20.0)  # a single corner tree; the rest is open
+    diagonal = math.hypot(10.0, 10.0)
+    for min_width in (0.0, 5.0):
+        gaps = find_gaps(chm, threshold=2.0, min_area=1.0, min_width=min_width)
+        assert gaps, f"expected an opening at min_width={min_width}"
+        for gap in gaps:
+            assert gap.width <= diagonal
+            assert gap.touches_edge is True
+
+
+def test_interior_gap_width_is_unaffected_by_the_edge_bound():
+    """A gap far from the border must still measure to the surrounding canopy."""
+    chm = Grid.filled(40, 40, 20.0, cellsize=1.0)
+    for row in range(16, 24):  # an 8 m x 8 m opening in the middle
+        for col in range(16, 24):
+            chm.set(row, col, 0.0)
+    gap = find_gaps(chm, threshold=2.0, min_area=1.0, min_width=0.0)[0]
+    assert gap.touches_edge is False
+    assert 7.0 <= gap.width <= 9.0

@@ -193,3 +193,19 @@ def test_render_json_without_field_data_has_no_nan(stand):
     payload = json.loads(text)
     assert payload["allometry"]["rmse_m"] is None
     assert payload["allometry"]["fitted"] is False
+
+
+def test_reports_show_the_yield_basis(report):
+    """A partial volume estimate must show how many stems it rests on."""
+    assert "yield basis" in render_text(report)
+    assert "Stems behind volume and biomass" in render_markdown(report)
+
+
+def test_reports_render_an_uncounted_stand_without_zeros():
+    from silvispect.grid import Grid
+
+    uncounted = inspect_stand(chm=Grid.filled(20, 20, 20.0, cellsize=0.5), run_detection=False)
+    text = render_text(uncounted)
+    assert "no stem data" in text
+    assert "stems/ha          -" in text
+    assert "0 trees" not in render_markdown(uncounted)

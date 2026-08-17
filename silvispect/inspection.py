@@ -136,6 +136,11 @@ class InspectionConfig:
         """
         if self.min_allometry_points < 1:
             raise ValueError("min_allometry_points must be at least 1")
+        for name, value in asdict(self).items():
+            # Infinity survives every range check below and only fails later, at
+            # JSON serialisation or inside a fit, so it is rejected here.
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value}")
         for name in self._FRACTIONS:
             value = getattr(self, name)
             if not 0.0 <= value <= 1.0:
@@ -162,7 +167,17 @@ class InspectionConfig:
         for key, value in data.items():
             if isinstance(value, bool) or not isinstance(value, (int, float, str)):
                 raise ValueError(f"{key} must be a number, got {type(value).__name__}")
-            converted[key] = int(value) if key == "min_allometry_points" else float(value)
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError(f"{key} must be a finite number, got {value}")
+            if key == "min_allometry_points":
+                # Truncating 1.9 to 1 would silently apply a threshold the
+                # profile never asked for.
+                if number != int(number):
+                    raise ValueError(f"{key} must be a whole number, got {value}")
+                converted[key] = int(number)
+            else:
+                converted[key] = number
         return cls(**converted)  # type: ignore[arg-type]
 
     @classmethod
@@ -235,6 +250,8 @@ def check_stocking(ctx: InspectionContext) -> Iterable[Finding]:
     if not ctx.has_stem_source:
         return
     density = ctx.metrics.stems_per_ha
+    if density is None:  # nothing counted stems, so there is nothing to judge
+        return
     cfg = ctx.config
     if density < cfg.min_stems_per_ha:
         yield Finding(
@@ -741,7 +758,11 @@ def inspect_stand(
         analysis_trees = []
         source = "none"
 
-    metrics = stand_metrics(analysis_trees, area_ha)
+    metrics = (
+        StandMetrics.unknown(area_ha)
+        if source == "none"
+        else stand_metrics(analysis_trees, area_ha)
+    )
     match: MatchResult | None = None
     if detection is not None and field_trees:
         match = match_trees(detection.crowns, field_trees, tolerance=config.match_tolerance_m)

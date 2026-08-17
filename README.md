@@ -23,13 +23,14 @@ Silvispect inspection
 area              0.250 ha (field data)
 trees             85
 stems/ha          340
+yield basis       85 stems
 basal area/ha     25.11 m2
 qmd               30.67 cm
 lorey height      23.05 m
 dominant height   24.38 m
 volume/ha         289.38 m3
 canopy cover      63.6%
-gaps mapped       4
+gaps mapped       3
 detection         recall 98.8%, precision 100.0%
 
 findings (2 notice):
@@ -79,10 +80,10 @@ crown   min 2.8 m  mean 4.1 m  max 5.5 m
 
 # Map the canopy openings
 $ silvispect gaps data/plot-a1-chm.asc
-4 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        164 m2  width  12.3 m  centre (612525.5, 6642009.3)
-  gap 2         62 m2  width   5.8 m  centre (612545.6, 6642035.6)
-  ...
+3 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
+  gap 1        164 m2  width  12.3 m  centre (612525.5, 6642009.3)  [edge]
+  gap 2         62 m2  width   5.8 m  centre (612545.6, 6642035.6)  [edge]
+  gap 3         42 m2  width   5.8 m  centre (612508.7, 6642018.5)
 
 # Compare the detections against the field record
 $ silvispect match data/plot-a1-trees.csv --chm data/plot-a1-chm.asc
@@ -238,7 +239,7 @@ in [`docs/data-formats.md`](docs/data-formats.md).
 
 ```console
 $ pip install -e ".[dev]"
-$ pytest              # 227 tests
+$ pytest              # 236 tests
 $ ruff check .
 $ ruff format --check .
 ```
