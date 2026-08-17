@@ -1,0 +1,305 @@
+"""Stand-level mensuration metrics computed from a list of trees.
+
+All per-hectare quantities are expansions of the sampled trees onto the plot
+area supplied by the caller; Silvispect never guesses the area, because an
+unstated expansion factor is the classic way an inventory summary becomes
+quietly wrong.
+"""
+
+from __future__ import annotations
+
+import math
+from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+
+from .inventory import Tree
+
+__all__ = [
+    "DEFAULT_FORM_FACTOR",
+    "DEFAULT_WOOD_DENSITY",
+    "MetricsError",
+    "StandMetrics",
+    "above_ground_biomass",
+    "basal_area",
+    "diameter_distribution",
+    "dominant_height",
+    "gini_coefficient",
+    "lorey_height",
+    "quadratic_mean_diameter",
+    "reineke_sdi",
+    "shannon_index",
+    "simpson_index",
+    "species_composition",
+    "stand_metrics",
+    "stem_volume",
+]
+
+#: Cylindrical form factor used when converting basal area x height to volume.
+DEFAULT_FORM_FACTOR = 0.5
+
+#: Wood density in g/cm3 used by the biomass estimator when species is unknown.
+DEFAULT_WOOD_DENSITY = 0.5
+
+#: Wood densities in g/cm3 for the species codes Silvispect ships defaults for.
+WOOD_DENSITY: dict[str, float] = {
+    "PIAB": 0.40,
+    "PISY": 0.42,
+    "FASY": 0.58,
+    "QURO": 0.56,
+    "PSME": 0.45,
+    "BEPE": 0.52,
+}
+
+
+class MetricsError(ValueError):
+    """Raised when metrics are requested for impossible inputs."""
+
+
+def _measured(trees: Sequence[Tree]) -> list[Tree]:
+    return [tree for tree in trees if tree.dbh_cm is not None and tree.dbh_cm > 0]
+
+
+def basal_area(trees: Sequence[Tree]) -> float:
+    """Total cross-sectional area at breast height in square metres."""
+    return sum(tree.basal_area_m2 or 0.0 for tree in trees)
+
+
+def quadratic_mean_diameter(trees: Sequence[Tree]) -> float | None:
+    """Diameter of the tree of mean basal area, in centimetres."""
+    diameters = [tree.dbh_cm for tree in _measured(trees)]
+    if not diameters:
+        return None
+    return math.sqrt(sum(d * d for d in diameters) / len(diameters))  # type: ignore[operator]
+
+
+def lorey_height(trees: Sequence[Tree]) -> float | None:
+    """Basal-area weighted mean height, in metres.
+
+    Weighting by basal area makes the statistic robust to the many small stems
+    that dominate a raw arithmetic mean.
+    """
+    weight_sum = 0.0
+    weighted = 0.0
+    for tree in trees:
+        area = tree.basal_area_m2
+        if area is None or tree.height_m is None or tree.height_m <= 0:
+            continue
+        weight_sum += area
+        weighted += area * tree.height_m
+    if weight_sum == 0:
+        return None
+    return weighted / weight_sum
+
+
+def dominant_height(trees: Sequence[Tree], area_ha: float) -> float | None:
+    """Mean height of the 100 thickest stems per hectare ("top height")."""
+    if area_ha <= 0:
+        raise MetricsError("area_ha must be positive")
+    candidates = [
+        tree for tree in _measured(trees) if tree.height_m is not None and tree.height_m > 0
+    ]
+    if not candidates:
+        return None
+    count = max(1, min(len(candidates), round(100 * area_ha)))
+    ranked = sorted(candidates, key=lambda tree: tree.dbh_cm or 0.0, reverse=True)[:count]
+    return sum(tree.height_m for tree in ranked) / len(ranked)  # type: ignore[misc]
+
+
+def reineke_sdi(stems_per_ha: float, qmd_cm: float) -> float:
+    """Reineke's stand density index, referenced to a 25 cm quadratic mean diameter."""
+    if stems_per_ha < 0 or qmd_cm <= 0:
+        raise MetricsError("stems_per_ha must be non-negative and qmd positive")
+    return stems_per_ha * (qmd_cm / 25.0) ** 1.605
+
+
+def gini_coefficient(values: Sequence[float]) -> float | None:
+    """Gini coefficient of a non-negative distribution.
+
+    Applied to tree basal areas it summarises structural heterogeneity: ``0``
+    is a perfectly uniform even-aged stand, values above ~0.5 indicate a
+    strongly size-differentiated, often uneven-aged structure.
+    """
+    positives = [v for v in values if v is not None and v >= 0]
+    n = len(positives)
+    if n < 2:
+        return None
+    ordered = sorted(positives)
+    total = sum(ordered)
+    if total == 0:
+        return 0.0
+    weighted = sum((i + 1) * value for i, value in enumerate(ordered))
+    coefficient = (2.0 * weighted) / (n * total) - (n + 1.0) / n
+    # A perfectly uniform distribution can land a few ulps below zero.
+    return min(1.0, max(0.0, coefficient))
+
+
+def species_composition(trees: Sequence[Tree]) -> dict[str, float]:
+    """Proportion of stems per species code, descending by share."""
+    labelled = [tree.species.strip().upper() or "UNKNOWN" for tree in trees]
+    if not labelled:
+        return {}
+    counts = Counter(labelled)
+    total = sum(counts.values())
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return {species: count / total for species, count in ordered}
+
+
+def shannon_index(trees: Sequence[Tree]) -> float | None:
+    """Shannon entropy of the species mixture (natural log)."""
+    shares = species_composition(trees)
+    if not shares:
+        return None
+    return -sum(p * math.log(p) for p in shares.values() if p > 0)
+
+
+def simpson_index(trees: Sequence[Tree]) -> float | None:
+    """Gini-Simpson diversity: the chance two random stems differ in species."""
+    shares = species_composition(trees)
+    if not shares:
+        return None
+    return 1.0 - sum(p * p for p in shares.values())
+
+
+def diameter_distribution(trees: Sequence[Tree], *, class_width: float = 5.0) -> dict[str, int]:
+    """Stem counts per diameter class, keyed by the class lower bound."""
+    if class_width <= 0:
+        raise MetricsError("class_width must be positive")
+    counts: Counter[int] = Counter()
+    for tree in _measured(trees):
+        lower = int(math.floor(tree.dbh_cm / class_width) * class_width)  # type: ignore[operator]
+        counts[lower] += 1
+    return {f"{lower}-{lower + int(class_width)}": counts[lower] for lower in sorted(counts)}
+
+
+def stem_volume(tree: Tree, *, form_factor: float = DEFAULT_FORM_FACTOR) -> float | None:
+    """Merchantable stem volume in cubic metres via the form-factor method."""
+    area = tree.basal_area_m2
+    if area is None or tree.height_m is None or tree.height_m <= 0:
+        return None
+    return form_factor * area * tree.height_m
+
+
+def above_ground_biomass(tree: Tree, *, wood_density: float | None = None) -> float | None:
+    """Above-ground biomass in kilograms (pantropical Chave et al. 2014 form).
+
+    The equation ``AGB = 0.0673 * (rho * D^2 * H)^0.976`` is used with a wood
+    density looked up from the species code when one is not supplied.
+    """
+    if tree.dbh_cm is None or tree.dbh_cm <= 0:
+        return None
+    if tree.height_m is None or tree.height_m <= 0:
+        return None
+    if wood_density is None:
+        wood_density = WOOD_DENSITY.get(tree.species.strip().upper(), DEFAULT_WOOD_DENSITY)
+    return 0.0673 * (wood_density * tree.dbh_cm**2 * tree.height_m) ** 0.976
+
+
+@dataclass(frozen=True)
+class StandMetrics:
+    """A complete stand summary for one plot."""
+
+    area_ha: float
+    tree_count: int
+    measured_count: int
+    stems_per_ha: float
+    basal_area_per_ha: float | None
+    quadratic_mean_diameter_cm: float | None
+    mean_diameter_cm: float | None
+    mean_height_m: float | None
+    lorey_height_m: float | None
+    dominant_height_m: float | None
+    max_height_m: float | None
+    sdi: float | None
+    gini_basal_area: float | None
+    shannon: float | None
+    simpson: float | None
+    volume_per_ha_m3: float | None
+    biomass_per_ha_t: float | None
+    species_shares: dict[str, float] = field(default_factory=dict)
+    diameter_classes: dict[str, int] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "area_ha": round(self.area_ha, 4),
+            "tree_count": self.tree_count,
+            "measured_count": self.measured_count,
+            "stems_per_ha": round(self.stems_per_ha, 2),
+            "basal_area_per_ha_m2": _round(self.basal_area_per_ha, 3),
+            "qmd_cm": _round(self.quadratic_mean_diameter_cm, 2),
+            "mean_dbh_cm": _round(self.mean_diameter_cm, 2),
+            "mean_height_m": _round(self.mean_height_m, 2),
+            "lorey_height_m": _round(self.lorey_height_m, 2),
+            "dominant_height_m": _round(self.dominant_height_m, 2),
+            "max_height_m": _round(self.max_height_m, 2),
+            "sdi": _round(self.sdi, 1),
+            "gini_basal_area": _round(self.gini_basal_area, 4),
+            "shannon": _round(self.shannon, 4),
+            "simpson": _round(self.simpson, 4),
+            "volume_per_ha_m3": _round(self.volume_per_ha_m3, 2),
+            "biomass_per_ha_t": _round(self.biomass_per_ha_t, 2),
+            "species_shares": {k: round(v, 4) for k, v in self.species_shares.items()},
+            "diameter_classes": dict(self.diameter_classes),
+        }
+
+
+def stand_metrics(
+    trees: Sequence[Tree],
+    area_ha: float,
+    *,
+    live_only: bool = True,
+    form_factor: float = DEFAULT_FORM_FACTOR,
+    class_width: float = 5.0,
+) -> StandMetrics:
+    """Summarise a stand.
+
+    Args:
+        trees: Inventory records for the plot.
+        area_ha: Ground area the records represent, in hectares.
+        live_only: Exclude stems whose status is not a living state.
+        form_factor: Form factor for the volume estimate.
+        class_width: Width of the diameter classes in the distribution.
+
+    Raises:
+        MetricsError: If ``area_ha`` is not positive.
+    """
+    if area_ha <= 0:
+        raise MetricsError("area_ha must be positive")
+    selected = [tree for tree in trees if tree.is_live] if live_only else list(trees)
+    measured = _measured(selected)
+
+    diameters = [tree.dbh_cm for tree in measured if tree.dbh_cm is not None]
+    heights = [tree.height_m for tree in selected if tree.height_m and tree.height_m > 0]
+    qmd = quadratic_mean_diameter(measured)
+    stems_ha = len(selected) / area_ha
+
+    volumes = [stem_volume(tree, form_factor=form_factor) for tree in measured]
+    volume_total = sum(v for v in volumes if v is not None)
+    biomasses = [above_ground_biomass(tree) for tree in measured]
+    biomass_total = sum(b for b in biomasses if b is not None)
+
+    return StandMetrics(
+        area_ha=area_ha,
+        tree_count=len(selected),
+        measured_count=len(measured),
+        stems_per_ha=stems_ha,
+        basal_area_per_ha=basal_area(measured) / area_ha if measured else None,
+        quadratic_mean_diameter_cm=qmd,
+        mean_diameter_cm=sum(diameters) / len(diameters) if diameters else None,
+        mean_height_m=sum(heights) / len(heights) if heights else None,
+        lorey_height_m=lorey_height(selected),
+        dominant_height_m=dominant_height(selected, area_ha),
+        max_height_m=max(heights) if heights else None,
+        sdi=reineke_sdi(len(measured) / area_ha, qmd) if qmd else None,
+        gini_basal_area=gini_coefficient([tree.basal_area_m2 or 0.0 for tree in measured]),
+        shannon=shannon_index(selected),
+        simpson=simpson_index(selected),
+        volume_per_ha_m3=volume_total / area_ha if measured else None,
+        biomass_per_ha_t=(biomass_total / 1000.0) / area_ha if measured else None,
+        species_shares=species_composition(selected),
+        diameter_classes=diameter_distribution(measured, class_width=class_width),
+    )
+
+
+def _round(value: float | None, digits: int) -> float | None:
+    return None if value is None else round(value, digits)
