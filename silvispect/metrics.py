@@ -13,6 +13,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from .grid import mean_of, rms_of, sum_of
 from .inventory import Tree
 
 __all__ = [
@@ -62,7 +63,7 @@ def _measured(trees: Sequence[Tree]) -> list[Tree]:
 
 def basal_area(trees: Sequence[Tree]) -> float:
     """Total cross-sectional area at breast height in square metres."""
-    return sum(tree.basal_area_m2 or 0.0 for tree in trees)
+    return sum_of([tree.basal_area_m2 or 0.0 for tree in trees])
 
 
 def quadratic_mean_diameter(trees: Sequence[Tree]) -> float | None:
@@ -70,7 +71,7 @@ def quadratic_mean_diameter(trees: Sequence[Tree]) -> float | None:
     diameters = [tree.dbh_cm for tree in _measured(trees) if tree.dbh_cm is not None]
     if not diameters:
         return None
-    return math.sqrt(sum(d * d for d in diameters) / len(diameters))
+    return rms_of(diameters)
 
 
 def lorey_height(trees: Sequence[Tree]) -> float | None:
@@ -80,23 +81,33 @@ def lorey_height(trees: Sequence[Tree]) -> float | None:
     that dominate a raw arithmetic mean.
     """
     weights: list[float] = []
-    products: list[float] = []
+    heights: list[float] = []
     for tree in trees:
         area = tree.basal_area_m2
         if area is None or tree.height_m is None or tree.height_m <= 0:
             continue
         weights.append(area)
-        products.append(area * tree.height_m)
+        heights.append(tree.height_m)
     if not weights:
         return None
-    weight_sum = math.fsum(weights)
+    # Weights are carried in units of the largest of them, so neither the
+    # total nor any single ``area * height`` product can leave the finite
+    # range on stems that were individually acceptable; the scale is common to
+    # numerator and denominator and cancels out of the ratio.
+    scale = max(weights)
+    if scale == 0.0:
+        return None
+    shares = [weight / scale for weight in weights]
+    weight_sum = math.fsum(shares)
     if weight_sum == 0:
         return None
     # Summed exactly, so the answer is the same however the rows are ordered.
     # Running totals lose the small stems once a large one has been added, and
     # the loss depends on when it arrived: reversing a list of one 1e16 m stem
     # among twenty 1 m stems moved the result by a whole metre.
-    return math.fsum(products) / weight_sum
+    return math.fsum(share * height for share, height in zip(shares, heights, strict=True)) / (
+        weight_sum
+    )
 
 
 def dominant_height(trees: Sequence[Tree], area_ha: float) -> float | None:
@@ -117,14 +128,23 @@ def dominant_height(trees: Sequence[Tree], area_ha: float) -> float | None:
         candidates,
         key=lambda tree: (-(tree.dbh_cm or 0.0), -(tree.height_m or 0.0), tree.tree_id),
     )[:count]
-    return sum(tree.height_m for tree in ranked) / len(ranked)  # type: ignore[misc]
+    return mean_of([tree.height_m for tree in ranked])  # type: ignore[misc]
 
 
 def reineke_sdi(stems_per_ha: float, qmd_cm: float) -> float:
     """Reineke's stand density index, referenced to a 25 cm quadratic mean diameter."""
     if stems_per_ha < 0 or qmd_cm <= 0:
         raise MetricsError("stems_per_ha must be non-negative and qmd positive")
-    return stems_per_ha * (qmd_cm / 25.0) ** 1.605
+    try:
+        index = stems_per_ha * (qmd_cm / 25.0) ** 1.605
+    except OverflowError:
+        index = math.inf
+    if not math.isfinite(index):
+        raise MetricsError(
+            f"stand density index is not representable for qmd {qmd_cm!r} cm "
+            f"at {stems_per_ha!r} stems/ha"
+        )
+    return index
 
 
 def gini_coefficient(values: Sequence[float]) -> float | None:
@@ -139,10 +159,16 @@ def gini_coefficient(values: Sequence[float]) -> float | None:
     if n < 2:
         return None
     ordered = sorted(positives)
-    total = sum(ordered)
+    scale = max(ordered)
+    if scale == 0.0:
+        return 0.0
+    # Ranks multiply the values, so the products are formed in units of the
+    # largest value; the scale cancels between the two sums.
+    shares = [value / scale for value in ordered]
+    total = math.fsum(shares)
     if total == 0:
         return 0.0
-    weighted = sum((i + 1) * value for i, value in enumerate(ordered))
+    weighted = math.fsum((i + 1) * share for i, share in enumerate(shares))
     coefficient = (2.0 * weighted) / (n * total) - (n + 1.0) / n
     # A perfectly uniform distribution can land a few ulps below zero.
     return min(1.0, max(0.0, coefficient))
@@ -175,15 +201,35 @@ def simpson_index(trees: Sequence[Tree]) -> float | None:
     return 1.0 - sum(p * p for p in shares.values())
 
 
+def _class_bound(value: float) -> str:
+    """Render a class boundary without inventing or dropping precision."""
+    if value == int(value):
+        return str(int(value))
+    text = f"{value:.10f}".rstrip("0").rstrip(".")
+    return text if text and float(text) == value else repr(value)
+
+
 def diameter_distribution(trees: Sequence[Tree], *, class_width: float = 5.0) -> dict[str, int]:
-    """Stem counts per diameter class, keyed by the class lower bound."""
+    """Stem counts per diameter class, keyed by the class lower bound.
+
+    The class a stem falls in is its band *number*, not a rounded-off
+    centimetre value.  Truncating the lower bound to an integer collapsed every
+    band narrower than a centimetre onto its neighbours — at a class width of
+    0.5 cm, 0.2 cm and 0.7 cm were counted together in a class labelled
+    ``0-0`` — so the width is kept as given and the boundaries are computed
+    from the band number.
+    """
     if class_width <= 0:
         raise MetricsError("class_width must be positive")
     counts: Counter[int] = Counter()
     for tree in _measured(trees):
-        lower = int(math.floor(tree.dbh_cm / class_width) * class_width)  # type: ignore[operator]
-        counts[lower] += 1
-    return {f"{lower}-{lower + int(class_width)}": counts[lower] for lower in sorted(counts)}
+        counts[math.floor(tree.dbh_cm / class_width)] += 1  # type: ignore[operator]
+    return {
+        f"{_class_bound(index * class_width)}-{_class_bound((index + 1) * class_width)}": counts[
+            index
+        ]
+        for index in sorted(counts)
+    }
 
 
 def stem_volume(tree: Tree, *, form_factor: float = DEFAULT_FORM_FACTOR) -> float | None:
@@ -346,8 +392,8 @@ def stand_metrics(
         stems_per_ha=stems_ha,
         basal_area_per_ha=basal_area(measured) / area_ha if measured else None,
         quadratic_mean_diameter_cm=qmd,
-        mean_diameter_cm=sum(diameters) / len(diameters) if diameters else None,
-        mean_height_m=sum(heights) / len(heights) if heights else None,
+        mean_diameter_cm=mean_of(diameters) if diameters else None,
+        mean_height_m=mean_of(heights) if heights else None,
         lorey_height_m=lorey_height(selected),
         dominant_height_m=dominant_height(selected, area_ha),
         max_height_m=max(heights) if heights else None,
@@ -356,8 +402,8 @@ def stand_metrics(
         shannon=shannon_index(selected),
         simpson=simpson_index(selected),
         yield_basis_count=len(volumes),
-        volume_per_ha_m3=sum(volumes) / area_ha if volumes else None,
-        biomass_per_ha_t=(sum(biomasses) / 1000.0) / area_ha if biomasses else None,
+        volume_per_ha_m3=sum_of(volumes) / area_ha if volumes else None,
+        biomass_per_ha_t=(sum_of(biomasses) / 1000.0) / area_ha if biomasses else None,
         species_shares=species_composition(selected),
         diameter_classes=diameter_distribution(measured, class_width=class_width),
     )

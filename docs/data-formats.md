@@ -202,7 +202,14 @@ profile and [`findings.md`](findings.md) for what each threshold controls.
 
 `detection`, `match`, `allometry` and `gaps` are present only when the
 corresponding input was supplied. The output is strict JSON: absent statistics
-are `null`, never `NaN` or `Infinity`, so any parser can read it.
+are `null`, never `NaN` or `Infinity`, so any parser can read it. That holds
+for every command that writes JSON, and it is enforced rather than assumed —
+a number with no finite value stops the command instead of being printed.
+
+`recall`, `precision` and `f1` are `null` when their own denominator is empty:
+with no field stems there is no recall to report and with no detections there
+is no precision, and neither is zero. The agreement rules read them the same
+way and stay silent.
 
 `yield_basis_count` is the number of stems behind `volume_per_ha_m3` and
 `biomass_per_ha_t`. Both need a height as well as a diameter, so the totals

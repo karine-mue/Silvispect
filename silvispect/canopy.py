@@ -14,7 +14,7 @@ from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .grid import Grid, GridError
+from .grid import Grid, GridError, mean_of, stdev_of
 
 __all__ = [
     "STRATA_BREAKS",
@@ -459,9 +459,9 @@ def find_gaps(
                 gap_id=next_id,
                 cells=tuple(members),
                 area=area,
-                centroid_x=sum(xs) / len(xs),
-                centroid_y=sum(ys) / len(ys),
-                mean_height=sum(heights) / len(heights),
+                centroid_x=mean_of(xs),
+                centroid_y=mean_of(ys),
+                mean_height=mean_of(heights),
                 max_height=max(heights),
                 touches_edge=touches_edge,
                 inscribed_radius=inscribed,
@@ -515,8 +515,7 @@ def rugosity(chm: Grid, *, threshold: float = 0.0) -> float:
     heights = [h for _, _, h in chm.valid_cells() if h > threshold]
     if len(heights) < 2:
         return 0.0
-    mean = sum(heights) / len(heights)
-    return math.sqrt(sum((h - mean) ** 2 for h in heights) / (len(heights) - 1))
+    return stdev_of(heights)
 
 
 def vertical_strata(chm: Grid, breaks: tuple[float, ...] = STRATA_BREAKS) -> dict[str, float]:

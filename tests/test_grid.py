@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import decimal
 import math
+import sys
 
 import pytest
 
-from silvispect.grid import Grid, GridError
+from silvispect.grid import Grid, GridError, mean_of, rms_of, stdev_of, sum_of
+
+MAX = sys.float_info.max
 
 SAMPLE = """\
 ncols 3
@@ -333,3 +337,148 @@ def test_fractional_dimensions_are_malformed(header):
     with pytest.raises(GridError, match="whole number"):
         Grid.parse(header + "cellsize 1\n0\n")
     assert Grid.parse("ncols 2\nnrows 1\ncellsize 1\n0 1\n").ncols == 2
+
+
+def _oracle(values):
+    """Mean and sample standard deviation computed far outside float range."""
+    with decimal.localcontext() as ctx:
+        ctx.prec = 400
+        exact = [decimal.Decimal(value) for value in values]
+        mean = sum(exact) / len(exact)
+        if len(exact) < 2:
+            return mean, decimal.Decimal(0)
+        variance = sum((value - mean) ** 2 for value in exact) / (len(exact) - 1)
+        return mean, variance.sqrt()
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [MAX, MAX, MAX],
+        [-MAX, MAX, MAX, MAX],
+        [MAX / 4, -MAX / 4],
+        [MAX / 2, MAX / 2, -MAX / 2],
+        [1e308, 1e-308, 5.0],
+        [0.0, 1e200],
+        [5e-324, 1e-320, 3e-320],
+        [-3.0, -3.0, -3.0],
+        [7.5],
+    ],
+)
+def test_statistics_match_an_independent_high_precision_oracle(values):
+    """A statistic a raster's own values can express must come out exactly.
+
+    Every list here is made of values the raster accepts and has a mean and a
+    deviation inside the finite range, so there is a right answer to give.
+    Adding before dividing reached the limit part-way through three copies of
+    the largest float and raised, and subtracting a mean of the same size from
+    ``-MAX`` produced ``NaN`` — both for statistics a Decimal at 120 digits
+    prints without difficulty.
+
+    The oracle runs at 400 significant digits: the largest float needs 309 of
+    them, so a shorter context rounds the reference itself and invents a
+    deviation where the true one is zero.
+    """
+    stats = Grid.from_rows([values], cellsize=1.0).stats()
+    mean, stdev = _oracle(values)
+    assert math.isfinite(stats.mean) and math.isfinite(stats.stdev)
+    assert stats.mean == pytest.approx(float(mean), rel=1e-12, abs=1e-320)
+    assert stats.stdev == pytest.approx(float(stdev), rel=1e-12, abs=1e-320)
+
+
+def test_reductions_scale_before_they_sum():
+    """The shared helpers are the reason the statistics survive, so test them.
+
+    ``sum`` reaches the finite limit on a running total whose answer is
+    representable, and squaring reaches it for any value past about 1.3e154.
+    """
+    assert mean_of([MAX, MAX, MAX]) == MAX
+    assert stdev_of([MAX, MAX, MAX]) == 0.0
+    assert sum_of([MAX, MAX, -MAX]) == MAX
+    assert sum_of([]) == 0.0
+    assert rms_of([3.0, 4.0]) == pytest.approx(math.sqrt(12.5))
+    assert rms_of([1e200, 1e200]) == pytest.approx(1e200)
+    assert math.isfinite(rms_of([MAX, MAX]))
+    with pytest.raises(GridError):
+        mean_of([])
+
+
+def test_smoothing_a_saturated_raster_stays_finite():
+    """Smoothing runs before anything else in detection, so it cannot overflow.
+
+    The mean filter summed its window and divided afterwards.  Two cells at the
+    largest finite float made that sum infinite, and detection then tried to
+    turn an infinite search radius into a whole number of cells.
+    """
+    smoothed = Grid.from_rows([[MAX, MAX], [MAX, MAX]], cellsize=1.0).smooth_mean(1)
+    assert all(value == MAX for value in smoothed.values)
+
+
+def test_alignment_does_not_depend_on_which_grid_is_asked():
+    """``a`` lines up with ``b`` exactly when ``b`` lines up with ``a``.
+
+    The origin tolerance is a fraction of a cell, and cellsizes only have to
+    agree to a relative 1e-9.  Reading that fraction off the receiver alone
+    left a band in which ``a.combine(b)`` refused the pair that
+    ``b.combine(a)`` accepted, so whether two rasters could be subtracted
+    depended on the order they were written in.
+    """
+    a = Grid.filled(1, 1, 1.0, cellsize=1.0)
+    b = Grid.filled(1, 1, 2.0, cellsize=1.0 + 2**-33)
+    b.xllcorner = 1.00000000005e-06
+    with pytest.raises(GridError):
+        a.assert_aligned(b)
+    with pytest.raises(GridError):
+        b.assert_aligned(a)
+
+    same = Grid.filled(1, 1, 3.0, cellsize=1.0)
+    same.xllcorner = 1e-9
+    a.assert_aligned(same)
+    same.assert_aligned(a)
+
+
+@pytest.mark.parametrize("origin", [0.0, 1e6, 1e9])
+def test_symmetric_tolerance_still_does_not_grow_with_coordinates(origin):
+    """The pair-wise tolerance must not reintroduce a magnitude-relative one."""
+    a = Grid.filled(1, 1, 1.0, cellsize=1.0)
+    b = Grid.filled(1, 1, 1.0, cellsize=1.0)
+    a.xllcorner = origin
+    b.xllcorner = origin + 0.5
+    with pytest.raises(GridError):
+        a.assert_aligned(b)
+    with pytest.raises(GridError):
+        b.assert_aligned(a)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "ncols 5\nnrows 1\nncols 1\ncellsize 1\n",
+        "ncols 5\nnrows 1\ncellsize 1\ncellsize 2\n",
+        "ncols 5\nnrows 1\ncellsize 1\nNODATA_value -9999\nnodata_value -1\n",
+    ],
+)
+def test_a_repeated_header_field_is_malformed(header):
+    """Two answers to one question is bad input, not a correction.
+
+    Keeping the last silently discarded the first: ``ncols 5`` followed by
+    ``ncols 1`` read a one-column raster out of a five-value body and reported
+    no problem at all.
+    """
+    with pytest.raises(GridError, match="more than once"):
+        Grid.parse(header + "1 2 3 4 5\n")
+    assert Grid.parse("ncols 5\nnrows 1\ncellsize 1\n1 2 3 4 5\n").ncols == 5
+
+
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_corner_and_centre_origins_cannot_both_be_given(axis):
+    """The two spellings of the origin differ by half a cell.
+
+    Preferring the corner threw away whichever of the two the writer had
+    actually measured, and moved the raster half a cell without saying so.
+    """
+    header = f"ncols 1\nnrows 1\ncellsize 2\n{axis}llcorner 10\n{axis}llcenter 10\n"
+    with pytest.raises(GridError, match="both"):
+        Grid.parse(header + "1\n")
+    centred = Grid.parse(f"ncols 1\nnrows 1\ncellsize 2\n{axis}llcenter 10\n1\n")
+    assert getattr(centred, f"{axis}llcorner") == 9.0

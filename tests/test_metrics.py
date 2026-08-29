@@ -223,3 +223,62 @@ def test_lorey_height_does_not_depend_on_row_order():
         Tree(f"n{i}", 0.0, 0.0, dbh_cm=20.0 + i, height_m=15.0 + i * 0.5) for i in range(25)
     ]
     assert lorey_height(list(reversed(ordinary))) == lorey_height(ordinary)
+
+
+def test_a_diameter_class_is_a_band_not_a_rounded_centimetre():
+    """A class narrower than a centimetre still has to be its own class.
+
+    The lower bound was truncated to a whole number, so at a width of 0.5 cm
+    two stems a whole band apart were counted together under a label that read
+    ``0-0``.  The band number carries the width; the boundaries are computed
+    back from it.
+    """
+    trees = [
+        Tree(tree_id=str(i), x=0.0, y=0.0, dbh_cm=dbh) for i, dbh in enumerate([0.2, 0.7, 1.1])
+    ]
+    assert diameter_distribution(trees, class_width=0.5) == {"0-0.5": 1, "0.5-1": 1, "1-1.5": 1}
+
+    # A whole-centimetre width still reads exactly as it always did.
+    ordinary = [
+        Tree(tree_id=str(i), x=0.0, y=0.0, dbh_cm=dbh)
+        for i, dbh in enumerate([3.0, 12.0, 17.5, 44.0])
+    ]
+    assert diameter_distribution(ordinary) == {"0-5": 1, "10-15": 1, "15-20": 1, "40-45": 1}
+
+    # Every stem lands in exactly one class, whatever the width.
+    for width in (0.25, 0.5, 1.0, 2.5, 5.0, 7.5):
+        classes = diameter_distribution(ordinary, class_width=width)
+        assert sum(classes.values()) == len(ordinary)
+        assert len(set(classes)) == len(classes)
+
+
+def test_metrics_stay_finite_for_stems_the_inventory_accepts():
+    """Nothing an inventory will hold may overflow the summaries that read it.
+
+    Squaring a diameter before scaling it reaches the finite limit above about
+    1.3e154 cm, and a plain total reaches it on a running sum whose answer is
+    representable.  Both are far inside the range a CSV is allowed to state.
+    """
+    big = 1e150
+    trees = [Tree(tree_id=str(i), x=float(i), y=0.0, dbh_cm=big, height_m=30.0) for i in range(4)]
+    assert math.isfinite(quadratic_mean_diameter(trees))
+    assert quadratic_mean_diameter(trees) == pytest.approx(big)
+    assert math.isfinite(basal_area(trees))
+    assert math.isfinite(lorey_height(trees))
+    assert lorey_height(trees) == pytest.approx(30.0)
+    assert gini_coefficient([tree.basal_area_m2 for tree in trees]) == pytest.approx(0.0)
+
+    # Reineke's index really is out of range for these, and says so rather
+    # than handing an infinity to a JSON writer.
+    assert math.isfinite(reineke_sdi(1000.0, big))
+    with pytest.raises(MetricsError, match="not representable"):
+        reineke_sdi(1000.0, 1e200)
+
+
+def test_lorey_height_still_ignores_row_order_after_scaling():
+    """The exact-summation contract from the previous repair must survive."""
+    trees = [
+        Tree(tree_id="tall", x=0.0, y=0.0, dbh_cm=100.0, height_m=1e16),
+        *(Tree(tree_id=str(i), x=float(i), y=0.0, dbh_cm=10.0, height_m=1.0) for i in range(20)),
+    ]
+    assert lorey_height(trees) == lorey_height(list(reversed(trees)))

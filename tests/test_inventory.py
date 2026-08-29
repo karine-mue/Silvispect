@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import math
+import sys
 
 import pytest
 
 from silvispect.detect import Crown, TreeTop
 from silvispect.inventory import (
+    MAX_DBH_CM,
     InventoryError,
     Plot,
     Tree,
@@ -172,9 +175,11 @@ def test_matching_skips_dead_trees_by_default():
 
 def test_matching_with_no_data_is_empty():
     match = match_trees([], [])
-    assert match.recall == 0.0
-    assert match.precision == 0.0
-    assert match.f1 == 0.0
+    # Recall, precision and F1 each have their own empty denominator here, so
+    # every one of them is undefined rather than zero.
+    assert match.recall is None
+    assert match.precision is None
+    assert match.f1 is None
     assert match.height_bias is None
     assert match.height_rmse is None
     assert match.mean_offset is None
@@ -458,3 +463,81 @@ def test_inventory_csv_is_a_quantised_record():
     assert len(match_trees(crowns, rounded, tolerance=2.5).matches) == 1
     kept = parse_trees(trees_to_csv([tree], precision=6))
     assert len(match_trees(crowns, kept, tolerance=2.5).matches) == 0
+
+
+def test_an_undefined_ratio_is_not_a_bad_one():
+    """Precision and recall each have their own denominator.
+
+    Detecting nothing over an empty reference divided zero by zero three times
+    and called the answer 0.0, which the agreement rules then read as complete
+    failure — a warning about a comparison that had not happened.  A ratio with
+    no denominator is unknown, and unknown is not low.
+    """
+    empty = match_trees([], [])
+    assert (empty.recall, empty.precision, empty.f1) == (None, None, None)
+
+    crown = Crown(
+        tree_id=1,
+        apex=TreeTop(1, 0, 0, 1.0, 1.0, 20.0),
+        cells=((0, 0),),
+        area=1.0,
+        mean_height=20.0,
+        max_extent=0.0,
+    )
+    no_reference = match_trees([crown], [])
+    assert no_reference.recall is None
+    assert no_reference.precision == 0.0
+
+    no_detection = match_trees([], [Tree(tree_id="a", x=1.0, y=1.0, height_m=20.0)])
+    assert no_detection.recall == 0.0
+    assert no_detection.precision is None
+
+    payload = no_detection.as_dict()
+    assert payload["precision"] is None and payload["recall"] == 0.0
+    assert json.loads(json.dumps(payload, allow_nan=False))["precision"] is None
+
+
+def test_two_headings_for_one_field_are_refused():
+    """``x`` and ``easting`` are the same column under two names.
+
+    Folding the row into a dictionary kept whichever came last, so a file
+    headed ``x,easting,y`` reported the easting as the x of every stem and
+    said nothing at all about the column it had thrown away.
+    """
+    with pytest.raises(InventoryError, match="same field"):
+        parse_trees("x,easting,y\n1,999,2\n")
+    with pytest.raises(InventoryError, match="same field"):
+        parse_trees("x,y,dbh,dbh_cm\n1,2,30,40\n")
+    with pytest.raises(InventoryError, match="same field"):
+        parse_trees("x,y,X\n1,2,3\n")
+
+    # Distinct fields that merely share a prefix are still fine.
+    assert len(parse_trees("x,y,dbh_cm,height_m\n1,2,30,20\n")) == 1
+
+
+def test_a_row_with_more_fields_than_columns_is_refused():
+    """A value no column claims is data being dropped on the floor."""
+    with pytest.raises(InventoryError, match="fields for"):
+        parse_trees("x,y\n1,2,7\n")
+    # A trailing separator adds only blanks, and loses nothing.
+    assert len(parse_trees("x,y\n1,2,\n")) == 1
+    # Short rows stay tolerated: a missing optional value is not a dropped one.
+    assert parse_trees("x,y,dbh_cm\n1,2\n")[0].dbh_cm is None
+
+
+def test_a_stem_must_be_summarisable_to_be_accepted():
+    """Every accepted record has to survive the metrics that read it.
+
+    A diameter above ~1.5e156 has no representable basal area, so each summary
+    that reached it overflowed part-way through — after the earlier rows had
+    already been folded in.  Refusing the record keeps "accepted" and
+    "summarisable" the same set.
+    """
+    with pytest.raises(InventoryError, match="basal area"):
+        Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=1e200)
+    with pytest.raises(InventoryError, match="finite"):
+        Tree(tree_id="a", x=math.nan, y=0.0)
+    with pytest.raises(InventoryError, match="finite"):
+        Tree(tree_id="a", x=0.0, y=0.0, height_m=math.inf)
+
+    assert Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=MAX_DBH_CM).basal_area_m2 == sys.float_info.max

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import math
+import sys
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -64,6 +65,9 @@ COLUMN_ALIASES: dict[str, str] = {
 
 LIVE_STATUSES = frozenset({"live", "living", "alive", "l", "1"})
 
+#: Largest diameter whose basal area is still a finite float.
+MAX_DBH_CM = 200.0 * math.sqrt(sys.float_info.max / math.pi)
+
 
 class InventoryError(ValueError):
     """Raised for malformed inventory input."""
@@ -87,6 +91,27 @@ class Tree:
     height_m: float | None = None
     crown_diameter_m: float | None = None
     status: str = "live"
+
+    def __post_init__(self) -> None:
+        for name in ("x", "y"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value):
+                raise InventoryError(f"{name} must be a finite coordinate, got {value!r}")
+        for name in ("dbh_cm", "height_m", "crown_diameter_m"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if not math.isfinite(float(value)):
+                raise InventoryError(f"{name} must be finite when present, got {value!r}")
+        # A stem whose basal area cannot be represented has no usable metrics at
+        # all: every summary that reaches it overflows part-way through, after
+        # the earlier rows have already been folded in.  Refusing the record is
+        # the only answer that keeps "accepted" and "summarisable" the same set.
+        if self.dbh_cm is not None and self.dbh_cm > MAX_DBH_CM:
+            raise InventoryError(
+                f"dbh_cm above {MAX_DBH_CM:.3e} has no representable basal area, "
+                f"got {self.dbh_cm!r}"
+            )
 
     @property
     def is_live(self) -> bool:
@@ -169,12 +194,32 @@ def parse_trees(text: str) -> list[Tree]:
     except StopIteration:
         return []
     keys = [_normalise_key(name) for name in header]
+    # Two headings can normalise onto one field — ``x`` and ``easting`` both
+    # mean the abscissa — and folding the row into a dict kept whichever came
+    # last.  A file with ``x,easting,y`` reported the easting as the x of every
+    # stem and said nothing about the column it had dropped.  Which of the two
+    # was meant is not the reader's to guess.
+    columns: dict[str, list[str]] = {}
+    for name, key in zip(header, keys, strict=True):
+        columns.setdefault(key, []).append(name.strip())
+    duplicated = {key: names for key, names in columns.items() if len(names) > 1}
+    if duplicated:
+        detail = "; ".join(
+            f"{key} from " + ", ".join(repr(name) for name in names)
+            for key, names in sorted(duplicated.items())
+        )
+        raise InventoryError(f"inventory CSV names the same field twice: {detail}")
     if "x" not in keys or "y" not in keys:
         raise InventoryError("inventory CSV must provide 'x' and 'y' columns")
     trees: list[Tree] = []
     for row_number, row in enumerate(reader, start=2):
         if not any(cell.strip() for cell in row):
             continue
+        # A row with more fields than headings has data no column claims.
+        # Silently dropping the tail hid a whole misaligned file; a trailing
+        # separator, which adds only blanks, is still fine.
+        if len(row) > len(keys) and any(cell.strip() for cell in row[len(keys) :]):
+            raise InventoryError(f"row {row_number}: {len(row)} fields for {len(keys)} columns")
         record = {key: (row[i] if i < len(row) else "") for i, key in enumerate(keys)}
         x = _to_float(record.get("x"), field_name="x", row_number=row_number)
         y = _to_float(record.get("y"), field_name="y", row_number=row_number)
@@ -282,23 +327,33 @@ class MatchResult:
         return len(self.matches)
 
     @property
-    def recall(self) -> float:
-        """Share of reference trees that were detected."""
+    def recall(self) -> float | None:
+        """Share of reference trees that were detected, or ``None`` if there are none.
+
+        A share of nothing is not zero.  Reporting ``0.0`` for an empty field
+        reference read as measured failure, and the inspection warned that
+        0 of 0 stems had been found — a complaint about a population nobody
+        had surveyed.
+        """
         reference = self.matched + len(self.omissions)
-        return self.matched / reference if reference else 0.0
+        return self.matched / reference if reference else None
 
     @property
-    def precision(self) -> float:
-        """Share of detections that correspond to a reference tree."""
+    def precision(self) -> float | None:
+        """Share of detections that hit a reference tree, or ``None`` if there are none."""
         detected = self.matched + len(self.commissions)
-        return self.matched / detected if detected else 0.0
+        return self.matched / detected if detected else None
 
     @property
-    def f1(self) -> float:
-        denominator = self.recall + self.precision
+    def f1(self) -> float | None:
+        """Harmonic mean of recall and precision; ``None`` unless both are defined."""
+        recall, precision = self.recall, self.precision
+        if recall is None or precision is None:
+            return None
+        denominator = recall + precision
         if denominator == 0:
             return 0.0
-        return 2 * self.recall * self.precision / denominator
+        return 2 * recall * precision / denominator
 
     @property
     def height_bias(self) -> float | None:
@@ -335,9 +390,9 @@ class MatchResult:
             "omissions": len(self.omissions),
             "commissions": len(self.commissions),
             "tolerance_m": self.tolerance,
-            "recall": round(self.recall, 4),
-            "precision": round(self.precision, 4),
-            "f1": round(self.f1, 4),
+            "recall": _round_or_none(self.recall, 4),
+            "precision": _round_or_none(self.precision, 4),
+            "f1": _round_or_none(self.f1, 4),
             "height_bias_m": _round_or_none(self.height_bias, 3),
             "height_rmse_m": _round_or_none(self.height_rmse, 3),
             "mean_offset_m": _round_or_none(self.mean_offset, 3),

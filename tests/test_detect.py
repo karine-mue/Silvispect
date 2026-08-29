@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 
 import pytest
 
@@ -168,17 +169,203 @@ def test_detection_work_is_bounded_by_the_raster_not_the_window():
     small = max(elapsed(10.0), 1e-6)
     assert elapsed(1e5) / small < 50.0
 
-    # Ordinary detection is unchanged: a peak is still found, and it still
-    # suppresses every cell out to the window its own height buys — a 30 m
-    # tree searches 2 cells at this resolution.
+    # Ordinary detection is unchanged: the peak is still found, and every cell
+    # that can see it inside its *own* search window is still suppressed.  A
+    # 5 m cell searches one cell at this resolution, so that is the four cells
+    # orthogonally touching the peak; the surrounding flat field is one plateau
+    # and contributes one apex of its own, as it did before.
     grid = Grid.filled(9, 9, 5.0, cellsize=1.0)
     grid.set(4, 4, 30.0)
     found = {(top.row, top.col) for top in find_treetops(grid)}
     assert (4, 4) in found
-    suppressed = {
-        (row, col)
-        for row in range(2, 7)
-        for col in range(2, 7)
-        if (row - 4) ** 2 + (col - 4) ** 2 <= 4 and (row, col) != (4, 4)
+    assert len(found) == 2
+    dominated = {(3, 4), (4, 3), (4, 5), (5, 4)}
+    assert found & dominated == set()
+
+
+# ----------------------------------------------------------------------
+# equivariance under the symmetries of a raster
+# ----------------------------------------------------------------------
+def _rows_of(grid):
+    return [[grid.get(row, col) for col in range(grid.ncols)] for row in range(grid.nrows)]
+
+
+#: The eight symmetries of a rectangle, each as a way of moving the rows of a
+#: raster and the matching way of moving one of its cells.  Naming both halves
+#: lets a test state its expectation as the *transformed output* of the
+#: original run rather than as a second table of constants.
+SYMMETRIES = {
+    "fliplr": (
+        lambda rows: [row[::-1] for row in rows],
+        lambda r, c, nr, nc: (r, nc - 1 - c),
+    ),
+    "flipud": (
+        lambda rows: rows[::-1],
+        lambda r, c, nr, nc: (nr - 1 - r, c),
+    ),
+    "rot180": (
+        lambda rows: [row[::-1] for row in rows[::-1]],
+        lambda r, c, nr, nc: (nr - 1 - r, nc - 1 - c),
+    ),
+    "rot90": (
+        lambda rows: [list(col) for col in zip(*rows[::-1], strict=True)],
+        lambda r, c, nr, nc: (c, nr - 1 - r),
+    ),
+    "rot270": (
+        lambda rows: [list(col) for col in zip(*rows, strict=True)][::-1],
+        lambda r, c, nr, nc: (nc - 1 - c, r),
+    ),
+    "transpose": (
+        lambda rows: [list(col) for col in zip(*rows, strict=True)],
+        lambda r, c, nr, nc: (c, r),
+    ),
+    "antitranspose": (
+        lambda rows: [list(col) for col in zip(*[row[::-1] for row in rows[::-1]], strict=True)],
+        lambda r, c, nr, nc: (nc - 1 - c, nr - 1 - r),
+    ),
+}
+
+
+def moved(grid, name):
+    """Return ``grid`` under one symmetry, and the map that follows a cell."""
+    rows = _rows_of(grid)
+    move_rows, move_cell = SYMMETRIES[name]
+    nrows, ncols = grid.nrows, grid.ncols
+    turned = Grid.from_rows(move_rows(rows), cellsize=grid.cellsize)
+
+    def follow(cell):
+        return move_cell(cell[0], cell[1], nrows, ncols)
+
+    # The two halves have to describe the same motion, or the test proves
+    # nothing; every value must be found where the cell map says it went.
+    for row in range(nrows):
+        for col in range(ncols):
+            new_row, new_col = follow((row, col))
+            assert turned.get(new_row, new_col) == grid.get(row, col)
+    return turned, follow
+
+
+def test_a_mirrored_raster_is_not_a_different_forest():
+    """The reported case: one raster, its mirror image, and different answers.
+
+    ``8 7 4 8`` and its reflection ``8 4 7 8`` are the same four trees seen
+    from the other side of the plot.  Suppressing a cell that merely *equalled*
+    a neighbour made the left-hand 8 lose to the right-hand one in one
+    direction and survive in the other, so the mirror held a crown the
+    original did not — and the stocking findings came out reversed.
+    """
+    config = DetectionConfig(smooth_radius=0, min_height=0.0, min_crown_cells=1)
+    grid = Grid.from_rows([[8.0, 7.0, 4.0, 8.0]], cellsize=0.25)
+    mirror, follow = moved(grid, "fliplr")
+
+    original = detect_trees(grid, config)
+    reflected = detect_trees(mirror, config)
+    assert len(original.crowns) == len(reflected.crowns) == 2
+    assert {follow(cell) for crown in original.crowns for cell in crown.cells} == {
+        cell for crown in reflected.crowns for cell in crown.cells
     }
-    assert found & suppressed == set()
+
+
+CURATED = [
+    [[8.0, 7.0, 4.0, 8.0]],
+    [[8.0, 4.0, 7.0, 8.0]],
+    [[5.0, 5.0, 5.0, 5.0]],  # one flat plateau, no apex anywhere in particular
+    [[9.0, 3.0, 9.0], [3.0, 3.0, 3.0], [9.0, 3.0, 9.0]],  # four equal maxima
+    [[12.0, 12.0, 3.0], [12.0, 12.0, 3.0], [3.0, 3.0, 3.0]],  # a square plateau
+    [[20.0, 15.0, 10.0, 5.0]],  # a single descending path
+    [[10.0, 9.0, 8.0, 9.0, 10.0]],  # tied maxima with a descent between them
+    [[7.0, 7.0], [7.0, 7.0]],  # every cell tied
+    [[4.0, 3.0, 3.0], [20.0, 3.0, 8.0], [8.0, 3.0, 8.0], [8.0, 8.0, 8.0]],
+    [[6.0, 0.0, 6.0], [0.0, 0.0, 0.0], [6.0, 0.0, 6.0]],  # crowns at the size floor
+]
+
+
+@pytest.mark.parametrize("rows", CURATED, ids=range(len(CURATED)))
+@pytest.mark.parametrize("name", sorted(SYMMETRIES))
+@pytest.mark.parametrize("cellsize", [0.25, 1.0])
+def test_detection_follows_the_raster_through_every_symmetry(rows, name, cellsize):
+    """Rotating or reflecting a plot must rotate or reflect the answer.
+
+    Detection has three places where equal values have to be separated — which
+    candidate survives, which cell of a plateau is its apex, and which of two
+    crowns claims a contested cell — and each of them originally fell back on
+    the row and column, which reverse with the raster.  The expectation here is
+    the *transformed* result of the original run, so there is no second table
+    of constants to keep in step.
+
+    A raster the transform leaves unchanged is the one case where the mapped
+    crowns cannot be asked for.  ``5 5 5 5`` is its own mirror image, and its
+    plateau has no middle cell to be the apex of; whichever of the two central
+    cells is chosen, the mirror image of that choice is the other one.  The
+    count and the crown sizes are still fixed, and those are what is asserted
+    there.
+    """
+    config = DetectionConfig(smooth_radius=0, min_height=0.0)
+    grid = Grid.from_rows(rows, cellsize=cellsize)
+    turned, follow = moved(grid, name)
+
+    original = detect_trees(grid, config)
+    after = detect_trees(turned, config)
+
+    assert len(after.crowns) == len(original.crowns)
+    assert sorted(crown.height for crown in after.crowns) == sorted(
+        crown.height for crown in original.crowns
+    )
+    assert sorted(len(crown.cells) for crown in after.crowns) == sorted(
+        len(crown.cells) for crown in original.crowns
+    )
+    if turned.values != grid.values:
+        assert sorted(
+            tuple(sorted(map(follow, crown.cells))) for crown in original.crowns
+        ) == sorted(tuple(sorted(crown.cells)) for crown in after.crowns)
+
+
+@pytest.mark.parametrize("cellsize,smooth", [(0.25, 0), (1.0, 0), (1.0, 1)])
+def test_random_rasters_keep_their_tree_count_through_every_symmetry(cellsize, smooth):
+    """The count is the claim a report makes, so hold it over many rasters.
+
+    Heights are drawn from a short list on purpose: ties are what the ordering
+    rules exist for, and a continuous draw would almost never produce one.
+    """
+    rng = random.Random(20240607)
+    config = DetectionConfig(smooth_radius=smooth)
+    levels = (8.0, 7.0, 4.0, 3.0, 20.0)
+    for _ in range(120):
+        nrows, ncols = rng.randint(1, 4), rng.randint(1, 4)
+        rows = [[rng.choice(levels) for _ in range(ncols)] for _ in range(nrows)]
+        grid = Grid.from_rows(rows, cellsize=cellsize)
+        expected = len(detect_trees(grid, config).crowns)
+        for name in SYMMETRIES:
+            turned, _ = moved(grid, name)
+            assert len(detect_trees(turned, config).crowns) == expected, (rows, name)
+
+
+def test_equal_neighbours_do_not_delete_each_other():
+    """Two cells of the same height are both still treetops.
+
+    The window rejected a cell that any neighbour merely *reached*, so of two
+    equal maxima the one scanned second was deleted — which is what made the
+    answer depend on the scan direction.  A run of equal cells is one treetop
+    because it is one plateau, not because one of them won.
+    """
+    config = DetectionConfig(smooth_radius=0)
+    apart = find_treetops(Grid.from_rows([[9.0, 1.0, 1.0, 1.0, 9.0]], cellsize=1.0), config)
+    assert [(top.row, top.col) for top in apart] == [(0, 0), (0, 4)]
+
+    touching = find_treetops(Grid.from_rows([[9.0, 9.0, 1.0]], cellsize=1.0), config)
+    assert len(touching) == 1
+
+
+def test_a_plateau_apex_sits_in_the_middle_of_the_plateau():
+    """The representative cell of an equal-height run is its centre.
+
+    A corner is as defensible as any other member until the raster is
+    reflected, when the corner moves to the opposite side and the crown grows
+    somewhere else.  The centre travels with the run.
+    """
+    rows = [[0.0] * 7 for _ in range(7)]
+    for row in (2, 3, 4):
+        for col in (2, 3, 4):
+            rows[row][col] = 15.0
+    tops = find_treetops(Grid.from_rows(rows, cellsize=1.0))
+    assert [(top.row, top.col) for top in tops] == [(3, 3)]

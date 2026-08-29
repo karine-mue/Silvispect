@@ -39,6 +39,13 @@ silent: a stand nobody counted has *unknown* stocking, not zero stocking. A
 detector that did run and found nothing is a different matter — that is
 evidence of an empty stand, and SV001 fires.
 
+A canopy model whose cells are *all* nodata is the first case, not the second.
+The detector ran, but it had nothing to look at, so its empty result is not a
+count of zero: the report says `metrics_source: none`, `tree_count` is `null`,
+and the canopy rules (SV010, SV012) stay silent as well, since cover and open
+fraction are equally unmeasured. One valid cell is enough to make the raster an
+observation.
+
 ---
 
 ## SV00x — stocking and density

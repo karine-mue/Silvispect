@@ -489,3 +489,38 @@ def test_gap_fraction_is_exact_at_a_round_share():
         assert gap_fraction(Grid.from_rows(rows), threshold=2.0) == open_cells / 10
 
     assert gap_fraction(Grid.filled(2, 2, None), threshold=2.0) == 0.0
+
+
+def test_rugosity_stays_finite_for_a_raster_it_accepts():
+    """The deviations are taken in units of the largest height present.
+
+    Summing the squares first overflowed for any canopy above about 1.3e154 m
+    — an absurd forest, but a raster the reader accepts, writes back out and
+    describes everywhere else without complaint.
+    """
+    import sys
+
+    peak = sys.float_info.max
+    flat = Grid.from_rows([[peak, peak, peak]], cellsize=1.0)
+    assert rugosity(flat, threshold=0.0) == 0.0
+
+    spread = Grid.from_rows([[peak / 4, -peak / 4, peak / 4, peak / 4]], cellsize=1.0)
+    value = rugosity(spread, threshold=-peak)
+    assert math.isfinite(value) and value > 0.0
+
+
+def test_gap_geometry_stays_finite_for_a_raster_it_accepts():
+    """A gap centroid is an average, and averages were summed before dividing.
+
+    The cell centres here are each comfortably finite; only their running
+    total is not, which is exactly the case a plain ``sum`` gets wrong.  The
+    centroid it produced was ``Infinity``, and that went straight into a JSON
+    document.
+    """
+    grid = Grid.from_rows([[0.0] * 12 for _ in range(12)], cellsize=1e306)
+    gaps = find_gaps(grid, threshold=1.0, min_area=0.0, min_width=0.0)
+    assert gaps
+    for gap in gaps:
+        assert math.isfinite(gap.centroid_x)
+        assert math.isfinite(gap.centroid_y)
+        assert math.isfinite(gap.mean_height)

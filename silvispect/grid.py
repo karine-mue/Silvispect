@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["Grid", "GridError", "GridStats"]
+__all__ = ["Grid", "GridError", "GridStats", "mean_of", "rms_of", "stdev_of", "sum_of"]
 
 NODATA_DEFAULT = -9999.0
 
@@ -29,6 +29,77 @@ Value = float | None
 
 class GridError(ValueError):
     """Raised when a grid cannot be parsed or two grids are incompatible."""
+
+
+def sum_of(values: Sequence[float]) -> float:
+    """Total that stays exact, and that overflows only if the answer does.
+
+    ``sum`` rounds once per term and can pass the finite limit on a running
+    total whose final value is representable.  Accumulating in units of the
+    largest magnitude present removes both problems: the scaling is undone
+    once, at the end, so infinity is returned only when the true total really
+    is out of range.
+    """
+    if not values:
+        return 0.0
+    scale = max(abs(value) for value in values)
+    if scale == 0.0 or not math.isfinite(scale):
+        return math.fsum(values)
+    return scale * math.fsum(value / scale for value in values)
+
+
+def rms_of(values: Sequence[float]) -> float:
+    """Root mean square that cannot overflow on finite input.
+
+    Squaring first overflows for any magnitude above about ``1.3e154``, which
+    is far inside the range of diameters a stand table accepts, and yields
+    infinity for a quadratic mean that is perfectly ordinary.
+    """
+    count = len(values)
+    if count == 0:
+        raise GridError("root mean square of no values is undefined")
+    scale = max(abs(value) for value in values)
+    if scale == 0.0:
+        return 0.0
+    return scale * math.sqrt(math.fsum((value / scale) ** 2 for value in values) / count)
+
+
+def mean_of(values: Sequence[float]) -> float:
+    """Arithmetic mean that cannot overflow on finite input.
+
+    Every value a raster accepts must survive being summarised.  Adding first
+    and dividing afterwards overflows on three cells holding the largest finite
+    float, and dividing each term first rounds the running total just past the
+    limit on the same input — in both cases for a mean that is perfectly
+    representable.  Working in units of the largest magnitude present keeps
+    every term inside ``[-1, 1]``, and the scale is multiplied back in last.
+    """
+    count = len(values)
+    if count == 0:
+        raise GridError("mean of no values is undefined")
+    scale = max(abs(value) for value in values)
+    if scale == 0.0:
+        return 0.0
+    return scale * (math.fsum(value / scale for value in values) / count)
+
+
+def stdev_of(values: Sequence[float], mean: float | None = None) -> float:
+    """Sample standard deviation that cannot overflow on finite input.
+
+    The deviations are taken in units of the largest magnitude present, so
+    ``value - mean`` cannot overflow before the scaling that was meant to
+    protect it: a raster of ``-MAX`` and three ``MAX`` has a deviation of
+    exactly ``MAX``, which subtracting first turned into ``NaN``.
+    """
+    count = len(values)
+    if count < 2:
+        return 0.0
+    scale = max(abs(value) for value in values)
+    if scale == 0.0:
+        return 0.0
+    centre = (mean_of(values) if mean is None else mean) / scale
+    total = math.fsum((value / scale - centre) ** 2 for value in values)
+    return scale * math.sqrt(total / (count - 1))
 
 
 @dataclass(frozen=True)
@@ -161,6 +232,16 @@ class Grid:
     # ------------------------------------------------------------------
     # geometry
     # ------------------------------------------------------------------
+    @property
+    def has_observations(self) -> bool:
+        """Whether any cell of this raster was actually measured.
+
+        A raster of nothing but nodata covers ground that was never observed.
+        It is not a measurement of an empty place, and nothing downstream may
+        read it as one.
+        """
+        return any(value is not None for value in self.values)
+
     @property
     def cell_area(self) -> float:
         """Area of a single cell in square map units."""
@@ -322,12 +403,20 @@ class Grid:
         lets the allowance grow with the coordinate values — at an easting of
         1e9 a half-cell shift passed as aligned, and two rasters a half cell
         apart were subtracted cell for cell into a quietly wrong canopy model.
+
+        Alignment is a property of the pair, so the cell the tolerance is a
+        fraction of is taken from both grids rather than from whichever one the
+        call was written on.  Cellsizes only have to agree to a relative 1e-9,
+        and reading the fraction off the receiver alone left a band in which
+        ``a.combine(b)`` refused the very same pair that ``b.combine(a)``
+        accepted.  The smaller cell is the honest choice: it is the finer of
+        the two resolutions being claimed to line up.
         """
         if (self.ncols, self.nrows) != (other.ncols, other.nrows):
             raise GridError("grids differ in shape")
         if not math.isclose(self.cellsize, other.cellsize, rel_tol=1e-9):
             raise GridError("grids differ in cellsize")
-        tolerance = abs(self.cellsize) * 1e-6
+        tolerance = min(abs(self.cellsize), abs(other.cellsize)) * 1e-6
         if (
             abs(self.xllcorner - other.xllcorner) > tolerance
             or abs(self.yllcorner - other.yllcorner) > tolerance
@@ -378,7 +467,7 @@ class Grid:
 
     def smooth_mean(self, radius: int = 1) -> Grid:
         """Mean filter — suppresses fine noise before tree detection."""
-        return self.focal(lambda vals: sum(vals) / len(vals), radius, circular=True)
+        return self.focal(mean_of, radius, circular=True)
 
     def smooth_median(self, radius: int = 1) -> Grid:
         """Median filter — removes spikes while preserving crown edges."""
@@ -393,24 +482,9 @@ class Grid:
         if not values:
             return GridStats(0, nodata, None, None, None, None)
         count = len(values)
-        # Divided before summing so that a raster of large finite values cannot
-        # overflow on the way to a mean that is itself perfectly representable.
-        mean = math.fsum(value / count for value in values)
+        mean = mean_of(values)
         if count > 1:
-            # Scaled so that no square can overflow.  The deviations of finite
-            # heights are finite, but their squares need not be: a raster
-            # holding 0 and 1e200 is perfectly representable and every value in
-            # it is accepted, yet squaring the deviation raised an overflow —
-            # after the command had already written its output file — and the
-            # run reported failure over a number nobody had asked for.  Scaling
-            # by the largest deviation keeps every ratio within [-1, 1], and the
-            # scale is multiplied back in only after the square root.
-            largest = max(abs(v - mean) for v in values)
-            if largest == 0.0:
-                stdev = 0.0
-            else:
-                total = math.fsum(((v - mean) / largest) ** 2 for v in values)
-                stdev = largest * math.sqrt(total / (count - 1))
+            stdev = stdev_of(values, mean)
         else:
             stdev = 0.0
         return GridStats(count, nodata, min(values), max(values), mean, stdev)
@@ -466,6 +540,12 @@ class Grid:
                 break
             if len(parts) < 2:
                 raise GridError(f"header line {cursor + 1} has no value")
+            # Repeating a field is not a correction: the reader cannot know
+            # which of the two the writer meant, and keeping the last silently
+            # threw the first away.  "ncols 5" followed by "ncols 50" read a
+            # different raster out of the same body with no complaint.
+            if key in header:
+                raise GridError(f"header field {key!r} is given more than once")
             try:
                 header[key] = float(parts[1])
             except ValueError as exc:
@@ -493,6 +573,13 @@ class Grid:
         nrows = dimensions["nrows"]
         cellsize = header["cellsize"]
         nodata = header.get("nodata_value", NODATA_DEFAULT)
+        # Corner and centre are two ways of stating the same origin, and they
+        # disagree by half a cell.  Preferring the corner discarded whichever
+        # of the two the writer had actually measured, so a header that states
+        # both is asked to state one.
+        for corner, centre in (("xllcorner", "xllcenter"), ("yllcorner", "yllcenter")):
+            if corner in header and centre in header:
+                raise GridError(f"header gives both {corner!r} and {centre!r}")
         if "xllcorner" in header:
             xll = header["xllcorner"]
         elif "xllcenter" in header:

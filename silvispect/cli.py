@@ -189,7 +189,7 @@ def _cmd_detect(args: argparse.Namespace, out) -> int:
     if args.labels:
         result.label_grid.write(args.labels)
     if args.json:
-        print(json.dumps(result.as_dict(), indent=2), file=out)
+        print(json.dumps(result.as_dict(), indent=2, allow_nan=False), file=out)
         return EXIT_OK
     print(
         f"detected {len(result.crowns)} trees "
@@ -220,7 +220,7 @@ def _cmd_metrics(args: argparse.Namespace, out) -> int:
     trees = read_trees(args.inventory)
     metrics = stand_metrics(trees, args.area_ha, live_only=not args.include_dead)
     if args.json:
-        print(json.dumps(metrics.as_dict(), indent=2), file=out)
+        print(json.dumps(metrics.as_dict(), indent=2, allow_nan=False), file=out)
         return EXIT_OK
     for key, value in metrics.as_dict().items():
         if isinstance(value, dict):
@@ -240,7 +240,7 @@ def _cmd_gaps(args: argparse.Namespace, out) -> int:
         chm, threshold=args.threshold, min_area=args.min_area, min_width=args.min_width
     )
     if args.json:
-        print(json.dumps([gap.as_dict() for gap in gaps], indent=2), file=out)
+        print(json.dumps([gap.as_dict() for gap in gaps], indent=2, allow_nan=False), file=out)
         return EXIT_OK
     open_fraction = gap_fraction(chm, threshold=args.threshold)
     print(
@@ -273,7 +273,7 @@ def _cmd_match(args: argparse.Namespace, out) -> int:
     result = detect_trees(chm)
     match = match_trees(result.crowns, reference, tolerance=args.tolerance)
     if args.json:
-        print(json.dumps(match.as_dict(), indent=2), file=out)
+        print(json.dumps(match.as_dict(), indent=2, allow_nan=False), file=out)
         return EXIT_OK
     for key, value in match.as_dict().items():
         print(f"{key:<16} {_fmt(value)}", file=out)
@@ -284,7 +284,7 @@ def _cmd_allometry(args: argparse.Namespace, out) -> int:
     trees = read_trees(args.inventory)
     model = fit_height_diameter(trees, model=args.model)
     if args.json:
-        print(json.dumps(model.as_dict(), indent=2), file=out)
+        print(json.dumps(model.as_dict(), indent=2, allow_nan=False), file=out)
         return EXIT_OK
     print(f"model      {model.name}", file=out)
     print(f"equation   {model.spec.description}", file=out)

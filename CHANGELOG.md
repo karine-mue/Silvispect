@@ -19,7 +19,7 @@ a correction to behaviour that was wrong. Two of them are visible in output —
 decimals, and gains an optional `--precision` to round on request — but neither
 is a new capability. The rounding was the defect.
 
-Three rounds of review after the release found these. As before, each fix
+Seven rounds of review after the release found these. As before, each fix
 carries a test that fails against the code as it stood — and where the defect
 violated a general property, that property is what the test asserts, over
 randomized inputs rather than the one raster that exposed it.
@@ -144,6 +144,79 @@ incomplete, and turned up five defects that have been there since 0.1.0:
 - Lorey's mean height depended on row order for extreme inputs, because a
   running total loses the small stems once a large one has been added. Summed
   exactly instead.
+
+Seventh round — a review of the sixth round's repairs found eleven further
+defects, two of them serious, and one of them introduced by the sixth round
+itself:
+
+- **Detection was not the same forest seen from the other side.** A cell was
+  suppressed when any neighbour merely *reached* its height, so of two equal
+  maxima the one scanned second was deleted: `8 7 4 8` found one tree and its
+  mirror image `8 4 7 8` found none, and the stocking findings came out
+  reversed. Equal cells no longer suppress each other — a run of them is one
+  plateau, which is one treetop — and the three places where equal values still
+  have to be separated (the order crowns are seeded in, the apex chosen for a
+  plateau, and which crown claims a contested cell) now break their ties on
+  quantities that travel with the plot rather than on the row and column, which
+  reverse with it. Distances are counted in whole cells so that a reflection
+  reproduces them exactly. Over 31,500 comparisons across the eight symmetries
+  of a raster, the tree count is now identical in every one; it differed in
+  1,298 before.
+- **An empty raster was reported as an empty forest.** Detection over a raster
+  with no valid cell returns no crowns, and that was recorded as a *count* of
+  zero from "detected" data. The rules read the zero as a measurement and
+  reported an understocked stand and a canopy cover below target — two
+  confident findings about a plot nobody had looked at. "Nothing was observed"
+  is now distinct from "nothing was found": `metrics_source` reads `none`, the
+  count is `null`, and the rules that need canopy observations stay quiet.
+- **Undefined agreement ratios were reported as zero.** With no field stems
+  there is no recall and with no detections there is no precision, but 0/0 was
+  recorded as `0.0` and the rules read it as complete failure. Each ratio is
+  now `null` when its own denominator is empty, through the JSON and the
+  reports as well as the rules.
+- **Statistics still overflowed on values a raster accepts.** Three cells at
+  the largest finite float raised part-way through the sum, and a raster of
+  `-MAX` and three `MAX` produced `NaN` because the deviation was taken before
+  the scaling meant to protect it. Both now come out exactly, checked against
+  a 400-digit Decimal oracle.
+- **The neighbouring reductions had the same defect.** The smoothing filter,
+  crown and gap means, rugosity, and the diameter and volume aggregations all
+  summed before dividing or squared before scaling; the smoothing overflow made
+  default detection over two saturated cells fail converting an infinite search
+  radius to a whole number of cells. They now share overflow-safe helpers. A
+  stem whose basal area has no finite value is refused when it is read rather
+  than overflowing a summary half-way through, and the four JSON-producing
+  commands write strict JSON — a gap area that genuinely has no finite value is
+  now refused rather than printed as `Infinity` beside a successful exit.
+- **Alignment depended on which raster was asked.** *Introduced by the sixth
+  round.* The origin tolerance was a fraction of the receiver's cell, and
+  cellsizes only have to agree to a relative 1e-9, so there was a band in which
+  `a.combine(b)` refused the pair that `b.combine(a)` accepted. The tolerance
+  is now taken from both grids. It is still a fraction of a cell, so it still
+  does not grow with the coordinates.
+- **Diameter classes narrower than a centimetre collapsed.** The class lower
+  bound was truncated to a whole number, so at a width of 0.5 cm two stems a
+  whole band apart were counted together in a class labelled `0-0`. Stems are
+  binned by band number and the boundaries are computed back from it, so the
+  labels state the width they were asked for.
+- **Two headings for one field silently kept the last.** A CSV headed
+  `x,easting,y` reported the easting as the x of every stem and said nothing
+  about the column it had dropped; a raster header repeating `ncols`, or giving
+  both `xllcorner` and `xllcenter`, did the same. Ambiguous input is now
+  refused rather than resolved by scan order, and a row with more fields than
+  the header has is refused instead of truncated.
+- **SV030 and SV031 fired on the threshold they document as strict.** Both are
+  described as departing by *more than* z standard deviations, so a threshold
+  of zero reported a stem sitting exactly on the mean as an outlier. Every rule
+  in the table was re-read against its wording; these two were the only ones
+  that disagreed, and a test now provokes each remaining rule and re-runs it
+  with the limit set to the value it just judged.
+- Writing an `InspectionConfig` in Python accepted booleans and strings that a
+  parsed profile refused, so a cover threshold could be `True`. Both doors now
+  enforce the same domain, as do the detection parameters.
+- A finding could print the two numbers it compared as one — "200 stems/ha is
+  below the minimum of 200 stems/ha". Precision is added only for the pairs
+  that would otherwise round together, so ordinary findings read as before.
 
 Default inventory CSV serialisation was examined and **left unchanged**. It
 rounds to three decimals, so a stem four ten-thousandths outside a match
