@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -344,33 +344,153 @@ class MatchResult:
         }
 
 
-def _augment(
-    crown_index: int,
-    adjacency: dict[int, list[int]],
-    matched_tree: dict[int, int],
-    matched_crown: dict[int, int],
-    visited: set[int],
-) -> bool:
-    """Kuhn's augmenting step, confined to one distance tier.
+def _min_cost_assignment(cost: list[list[int]]) -> list[int]:
+    """Assign every row a distinct column at minimum total cost.
 
-    Rerouting is allowed only among pairs formed in the current tier, so a
-    nearer pair is never broken to make room for an equally distant one.
+    The Jonker-Volgenant shortest-augmenting-path form of the Hungarian
+    algorithm.  ``cost`` must be rectangular with at least as many columns as
+    rows; the column chosen for each row is returned.  Costs are integers so
+    that the search is exact — the caller encodes an ordering, not a
+    measurement, and floating point would blur the very ties this resolves.
     """
-    for tree_index in adjacency.get(crown_index, ()):
-        if tree_index in visited:
-            continue
-        visited.add(tree_index)
-        holder = matched_tree.get(tree_index)
-        if holder is None or (
-            holder in adjacency
-            and _augment(holder, adjacency, matched_tree, matched_crown, visited)
-        ):
-            if holder is not None:
-                matched_crown.pop(holder, None)
-            matched_tree[tree_index] = crown_index
-            matched_crown[crown_index] = tree_index
-            return True
-    return False
+    rows = len(cost)
+    if rows == 0:
+        return []
+    cols = len(cost[0])
+    infinity = 1 + sum(max(abs(value) for value in row) for row in cost)
+    # ``potential_*`` are the dual variables; ``row_of`` maps a column to the
+    # row holding it, with ``0`` meaning free.  Index 0 of the column arrays is
+    # the virtual column each augmenting search starts from, so everything here
+    # is one-based against ``cost``.
+    potential_row = [0] * (rows + 1)
+    potential_col = [0] * (cols + 1)
+    row_of = [0] * (cols + 1)
+    came_from = [0] * (cols + 1)
+    for row in range(1, rows + 1):
+        row_of[0] = row
+        column = 0
+        slack = [infinity] * (cols + 1)
+        used = [False] * (cols + 1)
+        while True:
+            used[column] = True
+            current_row = row_of[column]
+            delta = infinity
+            next_column = 0
+            base = cost[current_row - 1]
+            for candidate in range(1, cols + 1):
+                if used[candidate]:
+                    continue
+                reduced = (
+                    base[candidate - 1] - potential_row[current_row] - potential_col[candidate]
+                )
+                if reduced < slack[candidate]:
+                    slack[candidate] = reduced
+                    came_from[candidate] = column
+                if slack[candidate] < delta:
+                    delta = slack[candidate]
+                    next_column = candidate
+            for candidate in range(cols + 1):
+                if used[candidate]:
+                    potential_row[row_of[candidate]] += delta
+                    potential_col[candidate] -= delta
+                else:
+                    slack[candidate] -= delta
+            column = next_column
+            if row_of[column] == 0:
+                break
+        while column:
+            previous = came_from[column]
+            row_of[column] = row_of[previous]
+            column = previous
+    assignment = [-1] * rows
+    for candidate in range(1, cols + 1):
+        if row_of[candidate]:
+            assignment[row_of[candidate] - 1] = candidate - 1
+    return assignment
+
+
+def _components(
+    crown_count: int, tree_count: int, candidates: Sequence[tuple[int, int, float]]
+) -> list[tuple[list[int], list[int], dict[tuple[int, int], float]]]:
+    """Split the candidate graph into independently solvable pieces.
+
+    Crowns and trees that share no candidate pair cannot influence each other's
+    outcome, and the objective is a sum over pairs, so each connected piece can
+    be optimised on its own.  Real inventories give tiny pieces — usually one
+    crown and one stem — which is what keeps the exact solver affordable.
+    """
+    parent = list(range(crown_count + tree_count))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for crown_index, tree_index, _ in candidates:
+        left, right = find(crown_index), find(crown_count + tree_index)
+        if left != right:
+            parent[left] = right
+
+    groups: dict[int, tuple[set[int], set[int], dict[tuple[int, int], float]]] = {}
+    for crown_index, tree_index, distance in candidates:
+        crowns, trees, edges = groups.setdefault(find(crown_index), (set(), set(), {}))
+        crowns.add(crown_index)
+        trees.add(tree_index)
+        edges[(crown_index, tree_index)] = distance
+    return [(sorted(crowns), sorted(trees), edges) for crowns, trees, edges in groups.values()]
+
+
+def _pair_by_distance(
+    candidates: Sequence[tuple[int, int, float]],
+    crown_count: int,
+    tree_count: int,
+    crown_rank: Callable[[int], tuple[float, str]],
+    tree_rank: Callable[[int], tuple[str, float]],
+) -> dict[int, int]:
+    """Pair crowns with trees, nearest distances first, exactly.
+
+    The objective is lexicographic over distances: honour as many pairs as
+    possible at the shortest distance, then as many as possible at the next,
+    and so on.  Settling one distance at a time and never looking further is
+    *not* enough to reach it — a tie at the shortest distance can be broken two
+    ways that both honour one pair there while only one of them leaves a
+    partner free for the next distance.  That is how identifiers used to leak
+    into the answer: two stems one metre either side of a crown were an
+    arbitrary choice on their own, but taking the wrong one stranded a second
+    crown two metres away, so relabelling the stems changed the match count.
+
+    The lexicographic objective is encoded as an integer weight per distance —
+    ``base`` raised to a power that falls with distance, with ``base`` larger
+    than any achievable pair count, so no number of farther pairs can outweigh
+    a single nearer one — and the exact optimum is found by a minimum-cost
+    assignment.  Ties in that optimum are settled by the caller's ranking.
+    """
+    matched: dict[int, int] = {}
+    for group_crowns, group_trees, edges in _components(crown_count, tree_count, candidates):
+        crown_order = sorted(group_crowns, key=crown_rank)
+        tree_order = sorted(group_trees, key=tree_rank)
+        tiers = sorted(set(edges.values()))
+        rank_of_distance = {distance: index for index, distance in enumerate(tiers)}
+        base = min(len(crown_order), len(tree_order)) + 1
+        weights = [base ** (len(tiers) - 1 - index) for index in range(len(tiers))]
+
+        # One column per candidate stem, plus one unclaimed column per crown so
+        # that leaving a crown unpaired is always available at zero cost.
+        width = len(tree_order) + len(crown_order)
+        cost = [[0] * width for _ in crown_order]
+        for row, crown in enumerate(crown_order):
+            for column, tree in enumerate(tree_order):
+                distance = edges.get((crown, tree))
+                if distance is not None:
+                    cost[row][column] = -weights[rank_of_distance[distance]]
+
+        for row, column in enumerate(_min_cost_assignment(cost)):
+            if column < len(tree_order):
+                crown, tree = crown_order[row], tree_order[column]
+                if (crown, tree) in edges:
+                    matched[crown] = tree
+    return matched
 
 
 def match_trees(
@@ -382,31 +502,29 @@ def match_trees(
 ) -> MatchResult:
     """Pair crowns with reference trees by planimetric distance.
 
-    Candidate pairs closer than ``tolerance`` are settled in ascending distance
-    order, so a nearer pair is never given up to make room for a further one.
-    Pairs at *equal* distance are settled together, by a maximum matching over
-    that distance alone: how many of them can be honoured is then a fact about
-    the geometry, not about the order the candidates were enumerated in.
+    Candidate pairs closer than ``tolerance`` compete under one objective: pair
+    as many crowns as possible at the shortest distance present, then — without
+    giving any of those up — as many as possible at the next distance, and so
+    on.  That objective is a function of the geometry alone, so how many pairs
+    are reported does not depend on the order the records were read in, on the
+    identifiers they carry, or on how the plot is oriented on the map.
+
+    Only the *count* at each distance is pinned by geometry.  Where the geometry
+    is symmetric — two crowns and two stems mutually equidistant, say — several
+    pairings are equally optimal and something outside the geometry has to
+    choose between them; identifiers do, because they travel with the records
+    through reordering and through any rigid motion of the plot.
     """
     if tolerance <= 0:
         raise InventoryError("tolerance must be positive")
     targets = [tree for tree in reference if tree.is_live] if live_only else list(reference)
 
-    # Pairs are grouped by distance and each group is resolved by a maximum
-    # matching, so how many pairs a group yields is a property of the geometry
-    # rather than of any ordering.  Two earlier tie-breaks both failed here: the
-    # row index made the answer depend on the order the CSV happened to be
-    # written in, and absolute coordinates made it depend on which way the plot
-    # was oriented — rotating the same forest 180 degrees moved recall from 0.5
-    # to 1.0.  Distances survive both, so they are the only thing the grouping
-    # uses; within a group, ordering falls back to height and identifier, which
-    # are properties of the trees themselves.
-    tiers: dict[float, list[tuple[int, int]]] = {}
+    candidates: list[tuple[int, int, float]] = []
     for i, crown in enumerate(crowns):
         for j, tree in enumerate(targets):
             distance = math.hypot(crown.x - tree.x, crown.y - tree.y)
             if distance <= tolerance:
-                tiers.setdefault(distance, []).append((i, j))
+                candidates.append((i, j, distance))
 
     def crown_rank(index: int) -> tuple[float, str]:
         return (-crowns[index].height, str(crowns[index].tree_id))
@@ -414,21 +532,8 @@ def match_trees(
     def tree_rank(index: int) -> tuple[str, float]:
         return (targets[index].tree_id, -(targets[index].height_m or 0.0))
 
-    matched_tree: dict[int, int] = {}
-    matched_crown: dict[int, int] = {}
-    for distance in sorted(tiers):
-        # Closer pairs are settled first, so a tier only sees partners that no
-        # nearer pair already claimed.
-        adjacency: dict[int, list[int]] = {}
-        for i, j in tiers[distance]:
-            if i in matched_crown or j in matched_tree:
-                continue
-            adjacency.setdefault(i, []).append(j)
-        for options in adjacency.values():
-            options.sort(key=tree_rank)
-        for i in sorted(adjacency, key=crown_rank):
-            if i not in matched_crown:
-                _augment(i, adjacency, matched_tree, matched_crown, set())
+    matched_crown = _pair_by_distance(candidates, len(crowns), len(targets), crown_rank, tree_rank)
+    matched_tree = {tree: crown for crown, tree in matched_crown.items()}
 
     matches = sorted(
         (

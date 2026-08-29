@@ -210,3 +210,126 @@ def test_serialisation_trims_trailing_zeros():
     text = Grid.from_rows([[1.5, 2.0]]).to_text()
     assert "1.5 2" in text
     assert "NODATA_value -9999" in text
+
+
+@pytest.mark.parametrize("origin", [0.0, 1.0, 1e3, 1e6, 1e9, 1e12])
+def test_origin_tolerance_does_not_grow_with_coordinates(origin):
+    """A half-cell shift is a different raster at every easting.
+
+    The allowance for origins is a fraction of a cell, so it means the same
+    thing on a projected grid a billion metres from the false origin as it does
+    at zero.  A relative tolerance on the coordinates instead let the allowance
+    grow with them, and two rasters half a cell apart at an easting of 1e9 were
+    subtracted cell for cell into a quietly wrong canopy model.
+    """
+    reference = Grid.from_rows([[10.0]], cellsize=1.0, xllcorner=origin)
+    for shift in (0.5, 0.1, 0.01):
+        shifted = Grid.from_rows([[1.0]], cellsize=1.0, xllcorner=origin + shift)
+        with pytest.raises(GridError, match="origin"):
+            reference.assert_aligned(shifted)
+
+
+@pytest.mark.parametrize("cellsize", [1e-9, 1e-3, 1.0, 10.0, 1e6])
+def test_origin_tolerance_is_a_fraction_of_a_cell(cellsize):
+    """Rounding noise is forgiven; a visible fraction of a cell is not."""
+    reference = Grid.from_rows([[10.0]], cellsize=cellsize)
+    noisy = Grid.from_rows([[1.0]], cellsize=cellsize, xllcorner=cellsize * 1e-9)
+    reference.assert_aligned(noisy)  # must not raise
+    displaced = Grid.from_rows([[1.0]], cellsize=cellsize, xllcorner=cellsize * 0.01)
+    with pytest.raises(GridError, match="origin"):
+        reference.assert_aligned(displaced)
+
+
+def test_window_yields_exactly_the_in_bounds_offsets():
+    """Clipping the walk must not change which cells come back, or their order."""
+    import random
+
+    def unclipped(grid, row, col, radius, circular):
+        out = []
+        for drow in range(-radius, radius + 1):
+            for dcol in range(-radius, radius + 1):
+                if circular and drow * drow + dcol * dcol > radius * radius:
+                    continue
+                if grid.in_bounds(row + drow, col + dcol):
+                    out.append((row + drow, col + dcol))
+        return out
+
+    rng = random.Random(4242)
+    for _ in range(400):
+        grid = Grid.filled(rng.randint(1, 7), rng.randint(1, 7), 0.0)
+        row, col = rng.randrange(grid.nrows), rng.randrange(grid.ncols)
+        radius, circular = rng.randint(0, 9), rng.random() < 0.5
+        assert list(grid.window(row, col, radius, circular=circular)) == unclipped(
+            grid, row, col, radius, circular
+        )
+
+
+def test_window_cost_follows_the_raster_not_the_requested_radius():
+    """A one-cell raster is one cell of work however wide the window asks to be.
+
+    The detector sizes its search window from the height of the cell it is
+    testing, so an accepted — if implausible — height buys an enormous radius.
+    Walking the whole requested square made a single-cell raster quadratic in a
+    number that describes nothing about it: at 1e5 m the search took sixteen
+    seconds to look at one cell.
+    """
+    import time
+
+    grid = Grid.filled(1, 1, 5.0)
+    for radius in (16, 1024, 1_000_000):
+        assert list(grid.window(0, 0, radius, circular=True)) == [(0, 0)]
+
+    def elapsed(radius: int) -> float:
+        start = time.perf_counter()
+        for _ in range(200):
+            list(grid.window(0, 0, radius, circular=True))
+        return time.perf_counter() - start
+
+    small = max(elapsed(16), 1e-6)
+    assert elapsed(4096) / small < 20.0
+
+
+@pytest.mark.parametrize("sentinel", [0.0, -9999.0, 1e300, -1e-300])
+def test_only_the_sentinel_itself_reads_back_as_absent(sentinel):
+    """Absence is an exact value, not a neighbourhood.
+
+    Treating nearby numbers as absent deleted measurements the document had
+    written out in full — with a sentinel of ``0`` the smallest positive float
+    a raster can hold vanished — and the band of swallowed values widened with
+    the magnitude of the sentinel.
+    """
+    neighbour = math.nextafter(sentinel, math.inf)
+    grid = Grid.from_rows([[neighbour, 1.0]], nodata_value=sentinel)
+    assert Grid.parse(grid.to_text(precision=None)).values == [neighbour, 1.0]
+
+    absent = Grid.from_rows([[None, 1.0]], nodata_value=sentinel)
+    assert Grid.parse(absent.to_text(precision=None)).values == [None, 1.0]
+
+
+def test_statistics_stay_finite_for_accepted_finite_values():
+    """Every value a raster accepts must survive being described.
+
+    A raster holding 0 and 1e200 is finite and is read, written and analysed
+    without complaint, but squaring the deviations overflowed — after the
+    command had already written its output — and the run reported failure over
+    a number nobody had asked for.
+    """
+    stats = Grid.from_rows([[0.0, 1e200]]).stats()
+    assert stats.mean == pytest.approx(5e199)
+    assert math.isfinite(stats.stdev) and stats.stdev > 0.0
+
+    extreme = Grid.from_rows([[-1e308, 1e308]]).stats()
+    assert extreme.mean == pytest.approx(0.0, abs=1.0)
+    assert math.isfinite(extreme.stdev)
+
+    for value in (1e308, 1e-308):
+        pair = Grid.from_rows([[value, value]]).stats()
+        assert math.isfinite(pair.mean) and pair.stdev == 0.0
+
+
+@pytest.mark.parametrize("header", ["ncols 1.9\nnrows 1\n", "ncols 1\nnrows 2.5\n"])
+def test_fractional_dimensions_are_malformed(header):
+    """A raster has a whole number of cells, so 1.9 columns is bad input."""
+    with pytest.raises(GridError, match="whole number"):
+        Grid.parse(header + "cellsize 1\n0\n")
+    assert Grid.parse("ncols 2\nnrows 1\ncellsize 1\n0 1\n").ncols == 2

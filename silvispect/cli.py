@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import __version__
 from .allometry import DEFAULT_MODEL, MODELS, AllometryError, fit_height_diameter
-from .canopy import canopy_cover, canopy_height_model, find_gaps
+from .canopy import canopy_cover, canopy_height_model, find_gaps, gap_fraction
 from .detect import DetectionConfig, detect_trees
 from .grid import Grid, GridError
 from .inspection import InspectionConfig, Severity, inspect_stand
@@ -242,7 +242,7 @@ def _cmd_gaps(args: argparse.Namespace, out) -> int:
     if args.json:
         print(json.dumps([gap.as_dict() for gap in gaps], indent=2), file=out)
         return EXIT_OK
-    open_fraction = 1.0 - canopy_cover(chm, args.threshold)
+    open_fraction = gap_fraction(chm, threshold=args.threshold)
     print(
         f"{len(gaps)} gaps at or above {args.min_area:.0f} m2 and {args.min_width:.1f} m wide; "
         f"{open_fraction:.1%} of the plot is below {args.threshold:.1f} m",
@@ -395,6 +395,13 @@ def _fmt(value: object) -> str:
     if value is None:
         return "-"
     if isinstance(value, float):
+        # Grouped decimals read well for the heights a forest actually has, and
+        # become a wall of digits for the ones it does not: a raster holding
+        # 1e200 is finite and accepted, but printing its mean in full spends
+        # two hundred characters saying nothing.  Past the range where a metre
+        # is a plausible unit, fall back to exponent notation.
+        if value and not -1e12 < value < 1e12:
+            return f"{value:.4g}"
         return f"{value:,.3f}".rstrip("0").rstrip(".")
     return str(value)
 

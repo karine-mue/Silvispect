@@ -486,8 +486,24 @@ def find_gaps(
 
 
 def gap_fraction(chm: Grid, *, threshold: float = 2.0) -> float:
-    """Fraction of the canopy below ``threshold`` — the complement of cover."""
-    return 1.0 - canopy_cover(chm, threshold)
+    """Fraction of valid cells below ``threshold``.
+
+    Counted from the open cells directly rather than as ``1 - cover``.  The two
+    are the same number in arithmetic but not in floating point: three open
+    cells in ten are exactly ``0.3`` counted, and ``0.30000000000000004`` taken
+    as one minus seven tenths.  Rules phrased as *above* a limit are read
+    strictly, so that last bit decided whether a plot sitting exactly on a
+    30 % limit was reported as breaching it.
+    """
+    total = 0
+    open_cells = 0
+    for _, _, height in chm.valid_cells():
+        total += 1
+        if height < threshold:
+            open_cells += 1
+    if total == 0:
+        return 0.0
+    return open_cells / total
 
 
 def rugosity(chm: Grid, *, threshold: float = 0.0) -> float:

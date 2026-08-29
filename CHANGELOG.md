@@ -19,10 +19,10 @@ a correction to behaviour that was wrong. Two of them are visible in output —
 decimals, and gains an optional `--precision` to round on request — but neither
 is a new capability. The rounding was the defect.
 
-Two rounds of review after the release found these. As before, each fix carries
-a test that fails against the code as it stood — and where the defect violated a
-general property, that property is what the test asserts, over randomized
-inputs rather than the one raster that exposed it.
+Three rounds of review after the release found these. As before, each fix
+carries a test that fails against the code as it stood — and where the defect
+violated a general property, that property is what the test asserts, over
+randomized inputs rather than the one raster that exposed it.
 
 Fourth round — a property campaign over 914 randomized stands applied
 transformations (translation, reflection, rotation, permutation) and checked
@@ -95,6 +95,63 @@ too slow to use:
   through a per-row disjoint-set walk. The same raster takes 0.59 s and the cost
   is now linear in the number of cells. A brute-force comparison over 400
   randomized rasters confirms the field is unchanged.
+
+Sixth round — an exhaustive campaign found that the matching repair was still
+incomplete, and turned up five defects that have been there since 0.1.0:
+
+- **Matching still let identifiers decide how many pairs it found.** Settling
+  one distance at a time and never looking further is not enough to honour the
+  documented objective. Two stems a metre either side of a crown are an
+  arbitrary choice on their own, but taking the wrong one strands a second
+  crown two metres from the left-hand stem: relabelling the two stems, with the
+  geometry untouched, moved the match count from one to two. Matching now
+  reaches the stated optimum exactly — as many pairs as possible at the
+  shortest distance, then as many as possible at the next without giving any of
+  those up — by encoding it as an integer weight per distance and solving a
+  minimum-cost assignment over each connected cluster of candidates. Checked
+  against brute-force enumeration of every possible pairing on randomized
+  geometries. Only the *count* is fixed by geometry; where the geometry is
+  symmetric several pairings are equally optimal, and identifiers still choose
+  between them, which is now stated rather than incidental.
+- **Materially misaligned rasters were combined without complaint.** The origin
+  check kept a relative tolerance, so the allowance grew with the coordinates:
+  at an easting of 1e9 two rasters half a cell apart were subtracted cell for
+  cell into a quietly wrong canopy model. Origins must now agree to within a
+  millionth of a cell, which means the same thing at every magnitude.
+- **A one-cell raster could take sixteen seconds to detect one tree.** The
+  search window grows with the height of the cell being tested, so an accepted
+  height of 1e5 m asks for a radius of 5,501 cells, and the window walked the
+  whole requested square before discarding everything outside the raster. The
+  offsets are now clipped first, so the cost is the number of cells actually
+  looked at. The cells yielded, and their order, are unchanged.
+- **A plot exactly 30 % open was reported as above a 30 % limit.** The open
+  share was taken as one minus the cover, and `1.0 - 0.7` is not `0.3`. It is
+  now counted from the open cells directly, so a rule phrased as *above* a
+  limit reads strictly, and both numbers no longer print as "30%" beside a
+  finding that says one exceeds the other.
+- **Values close to the nodata sentinel were read back as absent.** Absence was
+  matched approximately, so with a sentinel of `0` the smallest positive number
+  a raster can hold vanished on the way back in, and the band of swallowed
+  values widened with the magnitude of the sentinel. The sentinel is written
+  exactly and is now matched exactly.
+- **`chm` wrote its output and then failed describing it.** A raster holding
+  `0` and `1e200` is finite and is accepted everywhere, but squaring the
+  deviations overflowed while computing display statistics, so the command
+  reported failure over a file it had already written correctly. Statistics are
+  now scaled before squaring and summed exactly.
+- Fractional raster dimensions — `ncols 1.9` — were truncated to a smaller
+  raster instead of being rejected as malformed.
+- Lorey's mean height depended on row order for extreme inputs, because a
+  running total loses the small stems once a large one has been added. Summed
+  exactly instead.
+
+Default inventory CSV serialisation was examined and **left unchanged**. It
+rounds to three decimals, so a stem four ten-thousandths outside a match
+tolerance is inside it after a round trip. That is the intended contract rather
+than a defect: `precision` is a documented parameter, an inventory is a record
+of measurements rather than an intermediate to be re-analysed, and a millimetre
+is finer than any field instrument reports. `docs/data-formats.md` now says so
+outright, and a test pins it.
 
 ## 0.1.0 — 2026-08-17
 

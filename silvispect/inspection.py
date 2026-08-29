@@ -23,7 +23,7 @@ from .allometry import (
     fit_by_species,
     residual_scores,
 )
-from .canopy import CanopyGap, canopy_cover, find_gaps, rugosity, vertical_strata
+from .canopy import CanopyGap, canopy_cover, find_gaps, gap_fraction, rugosity, vertical_strata
 from .detect import Crown, DetectionConfig, DetectionResult, detect_trees
 from .grid import Grid
 from .inventory import MatchResult, Tree, match_trees, trees_from_crowns
@@ -361,7 +361,7 @@ def check_gap_fraction(ctx: InspectionContext) -> Iterable[Finding]:
     """SV012 — too much of the plot is open canopy."""
     if ctx.chm is None:
         return
-    fraction = 1.0 - canopy_cover(ctx.chm, ctx.config.canopy_threshold)
+    fraction = gap_fraction(ctx.chm, threshold=ctx.config.canopy_threshold)
     if fraction > ctx.config.max_gap_fraction:
         yield Finding(
             "SV012",
@@ -802,7 +802,7 @@ def inspect_stand(
         stats = chm.stats()
         canopy_summary = {
             "cover": round(canopy_cover(chm, config.canopy_threshold), 4),
-            "gap_fraction": round(1.0 - canopy_cover(chm, config.canopy_threshold), 4),
+            "gap_fraction": round(gap_fraction(chm, threshold=config.canopy_threshold), 4),
             "rugosity_m": round(rugosity(chm, threshold=config.canopy_threshold), 3),
             "mean_height_m": _round(stats.mean, 3),
             "max_height_m": _round(stats.maximum, 3),

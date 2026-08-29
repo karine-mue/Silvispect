@@ -79,17 +79,24 @@ def lorey_height(trees: Sequence[Tree]) -> float | None:
     Weighting by basal area makes the statistic robust to the many small stems
     that dominate a raw arithmetic mean.
     """
-    weight_sum = 0.0
-    weighted = 0.0
+    weights: list[float] = []
+    products: list[float] = []
     for tree in trees:
         area = tree.basal_area_m2
         if area is None or tree.height_m is None or tree.height_m <= 0:
             continue
-        weight_sum += area
-        weighted += area * tree.height_m
+        weights.append(area)
+        products.append(area * tree.height_m)
+    if not weights:
+        return None
+    weight_sum = math.fsum(weights)
     if weight_sum == 0:
         return None
-    return weighted / weight_sum
+    # Summed exactly, so the answer is the same however the rows are ordered.
+    # Running totals lose the small stems once a large one has been added, and
+    # the loss depends on when it arrived: reversing a list of one 1e16 m stem
+    # among twenty 1 m stems moved the result by a whole metre.
+    return math.fsum(products) / weight_sum
 
 
 def dominant_height(trees: Sequence[Tree], area_ha: float) -> float | None:

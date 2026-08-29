@@ -197,3 +197,29 @@ def test_dominant_height_tie_at_the_cutoff_ignores_record_order():
     short = Tree("a", 0.0, 0.0, dbh_cm=30.0, height_m=10.0)
     tall = Tree("b", 1.0, 1.0, dbh_cm=30.0, height_m=30.0)
     assert dominant_height([short, tall], 0.01) == dominant_height([tall, short], 0.01)
+
+
+def test_lorey_height_does_not_depend_on_row_order():
+    """The same stand summarised in any order is the same stand.
+
+    A running total drops the small stems once a large one has been added, and
+    how much it drops depends on when the large one arrived.  Summed exactly,
+    reversing the list cannot move the answer.
+    """
+    import random
+
+    trees = [Tree("t0", 0.0, 0.0, dbh_cm=30.0, height_m=1e16)] + [
+        Tree(f"t{i}", 0.0, 0.0, dbh_cm=30.0, height_m=1.0) for i in range(1, 21)
+    ]
+    baseline = lorey_height(trees)
+    assert lorey_height(list(reversed(trees))) == baseline
+    rng = random.Random(9)
+    for _ in range(30):
+        shuffled = trees[:]
+        rng.shuffle(shuffled)
+        assert lorey_height(shuffled) == baseline
+
+    ordinary = [
+        Tree(f"n{i}", 0.0, 0.0, dbh_cm=20.0 + i, height_m=15.0 + i * 0.5) for i in range(25)
+    ]
+    assert lorey_height(list(reversed(ordinary))) == lorey_height(ordinary)

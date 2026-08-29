@@ -422,3 +422,26 @@ def test_an_empty_inventory_wins_over_detection_as_the_source():
 def test_missing_inventory_is_still_missing():
     with pytest.raises(ValueError, match="needs a canopy height model"):
         inspect_stand()
+
+
+def test_a_limit_is_not_breached_by_sitting_exactly_on_it():
+    """SV012 reads "above 30%" strictly, at exactly 30% too.
+
+    Taking the open share as one minus the cover made an exactly-three-tenths
+    plot come out as 0.30000000000000004, so a stand sitting precisely on the
+    documented limit was reported as over it — and both numbers printed as
+    "30%", leaving nothing on screen to explain the finding.
+    """
+    exactly = Grid.from_rows([[0.0] * 3 + [20.0] * 7])
+    codes = {finding.code for finding in inspect_stand(chm=exactly, area_ha=0.001).findings}
+    assert "SV012" not in codes
+
+    over = Grid.from_rows([[0.0] * 4 + [20.0] * 6])
+    assert "SV012" in {finding.code for finding in inspect_stand(chm=over, area_ha=0.001).findings}
+
+    # The same reading at every limit the option can be set to.
+    for open_cells in range(11):
+        rows = [[0.0] * open_cells + [20.0] * (10 - open_cells)]
+        config = InspectionConfig(max_gap_fraction=open_cells / 10)
+        report = inspect_stand(chm=Grid.from_rows(rows), area_ha=0.001, config=config)
+        assert "SV012" not in {finding.code for finding in report.findings}

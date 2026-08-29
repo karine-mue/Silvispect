@@ -266,16 +266,28 @@ class Grid:
                 yield (nrow, ncol)
 
     def window(self, row: int, col: int, radius: int, *, circular: bool = False) -> Iterator[Cell]:
-        """Yield in-bounds cells within ``radius`` cells of ``(row, col)``."""
+        """Yield in-bounds cells within ``radius`` cells of ``(row, col)``.
+
+        The offsets are clipped to the raster before they are walked, so the
+        cost is the number of cells actually yielded rather than the area of
+        the requested disc.  It has to be: the detector sizes its search window
+        from the height of the cell it is testing, and an accepted — if
+        implausible — height of 1e5 m asks for a radius of 5,501 cells.  On a
+        one-cell raster that is a single comparison worth of real work, but
+        walking the unclipped square spent thirty million.
+        """
         if radius < 0:
             raise GridError("radius must be non-negative")
-        for drow in range(-radius, radius + 1):
-            for dcol in range(-radius, radius + 1):
-                if circular and drow * drow + dcol * dcol > radius * radius:
-                    continue
-                nrow, ncol = row + drow, col + dcol
-                if self.in_bounds(nrow, ncol):
-                    yield (nrow, ncol)
+        squared = radius * radius
+        for drow in range(max(-radius, -row), min(radius, self.nrows - 1 - row) + 1):
+            span = radius
+            if circular:
+                # The widest in-disc offset on this row, so the column range is
+                # already circular and needs no per-cell rejection test.
+                span = math.isqrt(squared - drow * drow)
+            base = row + drow
+            for dcol in range(max(-span, -col), min(span, self.ncols - 1 - col) + 1):
+                yield (base, col + dcol)
 
     # ------------------------------------------------------------------
     # whole-grid operations
@@ -300,14 +312,25 @@ class Grid:
         return out
 
     def assert_aligned(self, other: Grid) -> None:
-        """Raise :class:`GridError` unless two grids share the same geometry."""
+        """Raise :class:`GridError` unless two grids share the same geometry.
+
+        Origins must agree to within a millionth of a cell.  The tolerance is a
+        fraction of the cell rather than a fixed distance because that is the
+        only scale the answer means anything on: a centimetre is nothing on a
+        10 m cell and a thousand cells on a millimetre one.  Expressing it in
+        metres, or leaving a relative tolerance on the coordinates themselves,
+        lets the allowance grow with the coordinate values — at an easting of
+        1e9 a half-cell shift passed as aligned, and two rasters a half cell
+        apart were subtracted cell for cell into a quietly wrong canopy model.
+        """
         if (self.ncols, self.nrows) != (other.ncols, other.nrows):
             raise GridError("grids differ in shape")
         if not math.isclose(self.cellsize, other.cellsize, rel_tol=1e-9):
             raise GridError("grids differ in cellsize")
-        if not (
-            math.isclose(self.xllcorner, other.xllcorner, abs_tol=1e-6)
-            and math.isclose(self.yllcorner, other.yllcorner, abs_tol=1e-6)
+        tolerance = abs(self.cellsize) * 1e-6
+        if (
+            abs(self.xllcorner - other.xllcorner) > tolerance
+            or abs(self.yllcorner - other.yllcorner) > tolerance
         ):
             raise GridError("grids differ in origin")
 
@@ -370,10 +393,24 @@ class Grid:
         if not values:
             return GridStats(0, nodata, None, None, None, None)
         count = len(values)
-        mean = sum(values) / count
+        # Divided before summing so that a raster of large finite values cannot
+        # overflow on the way to a mean that is itself perfectly representable.
+        mean = math.fsum(value / count for value in values)
         if count > 1:
-            variance = sum((v - mean) ** 2 for v in values) / (count - 1)
-            stdev = math.sqrt(variance)
+            # Scaled so that no square can overflow.  The deviations of finite
+            # heights are finite, but their squares need not be: a raster
+            # holding 0 and 1e200 is perfectly representable and every value in
+            # it is accepted, yet squaring the deviation raised an overflow —
+            # after the command had already written its output file — and the
+            # run reported failure over a number nobody had asked for.  Scaling
+            # by the largest deviation keeps every ratio within [-1, 1], and the
+            # scale is multiplied back in only after the square root.
+            largest = max(abs(v - mean) for v in values)
+            if largest == 0.0:
+                stdev = 0.0
+            else:
+                total = math.fsum(((v - mean) / largest) ** 2 for v in values)
+                stdev = largest * math.sqrt(total / (count - 1))
         else:
             stdev = 0.0
         return GridStats(count, nodata, min(values), max(values), mean, stdev)
@@ -442,8 +479,18 @@ class Grid:
         for line in lines[cursor:]:
             tokens.extend(line.split())
 
-        ncols = int(header["ncols"])
-        nrows = int(header["nrows"])
+        # A raster has a whole number of cells.  Truncating "ncols 1.9" to 1
+        # accepts a header nobody meant to write and reads the wrong number of
+        # values out of the body, so it is malformed input rather than a
+        # rounding question.
+        dimensions: dict[str, int] = {}
+        for name in ("ncols", "nrows"):
+            size = header[name]
+            if size != int(size):
+                raise GridError(f"header field {name!r} must be a whole number, got {size!r}")
+            dimensions[name] = int(size)
+        ncols = dimensions["ncols"]
+        nrows = dimensions["nrows"]
         cellsize = header["cellsize"]
         nodata = header.get("nodata_value", NODATA_DEFAULT)
         if "xllcorner" in header:
@@ -471,7 +518,13 @@ class Grid:
                 # A height of infinity is not a measurement, and it would travel
                 # all the way to a report that cannot serialise it.
                 raise GridError(f"cell value {token!r} is not a finite number")
-            values.append(None if math.isclose(number, nodata, abs_tol=1e-9) else number)
+            # Absence is written as the sentinel the header declares and is read
+            # back by matching it exactly.  Treating merely *nearby* values as
+            # absent silently deleted measurements: with a sentinel of 0 the
+            # smallest positive number a float can hold, 5e-324, is written out
+            # in full and read back as nodata, and the band of swallowed values
+            # widened with the magnitude of the sentinel.
+            values.append(None if number == nodata else number)
         return cls(ncols, nrows, xll, yll, cellsize, nodata, values)
 
     @classmethod

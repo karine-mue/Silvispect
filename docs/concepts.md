@@ -179,26 +179,50 @@ diameter, mean height, and maximum extent from the apex.
 
 ## 4. Matching detections to field trees
 
-`match_trees` pairs crowns with field stems by distance: candidates within a
-tolerance radius are settled in ascending distance order, so a nearer pair is
-never given up to make room for a further one. This yields a stable one-to-one
-assignment without a full Hungarian solve, which the problem size does not
-justify.
+`match_trees` pairs crowns with field stems within a tolerance radius under one
+objective:
 
-**Ties are settled by geometry alone.** Candidates at *equal* distance are
-resolved together, by a maximum bipartite matching restricted to that one
-distance. How many of them can be honoured is then a fact about the geometry,
-and nothing outside the geometry gets a vote.
+> Honour as many pairs as possible at the shortest distance present; then,
+> without giving up any of those, as many as possible at the next distance; and
+> so on.
 
-Two narrower rules were tried first and both failed, in the same way. Taking
-the earlier row made the answer depend on how the CSV happened to be written:
-two crowns and two stems all exactly one metre apart matched one pair in one row
-order and two in the other, moving recall from 0.5 to 1.0 and RMSE from 1.0 m to
-16.2 m on identical geometry. Ranking ties by *position* fixed that and
-introduced the same defect one step out — the answer then depended on which way
-the plot faced, and rotating the same four points by 180° moved recall from 0.5
-back to 1.0. A maximum matching has neither dependence, which the suite checks
-under translation, rotation, reflection and transposition.
+That is a function of the geometry alone. It is deliberately *not* "as many
+pairs as possible": one pair at half a metre outranks two at two metres,
+because a match is a claim that the detector found a particular stem, and a
+nearer claim is the better-evidenced one.
+
+**How many pairs are reported is fixed by the geometry.** Only that. Where the
+geometry is symmetric — two crowns and two stems mutually equidistant — several
+pairings are equally optimal, they differ in which crown is credited with which
+stem, and something outside the geometry has to choose. Identifiers do, because
+they travel with the records through reordering and through any rigid motion of
+the plot. Height bias and RMSE can therefore depend on identifiers in a
+perfectly symmetric plot; the counts cannot.
+
+Three narrower rules were tried first and all three failed the same way, by
+letting something that is not geometry decide the count. Taking the earlier row
+made the answer depend on how the CSV happened to be written: two crowns and
+two stems all exactly one metre apart matched one pair in one row order and two
+in the other, moving recall from 0.5 to 1.0 and RMSE from 1.0 m to 16.2 m on
+identical geometry. Ranking ties by *position* fixed that and introduced the
+same defect one step out — the answer then depended on which way the plot
+faced, and rotating the same four points by 180° moved recall from 0.5 back to
+1.0. Resolving each distance by a maximum matching *restricted to that
+distance* fixed both and still fell short: a tie can be broken two ways that
+both honour one pair now while only one of them leaves a partner free later, so
+two stems a metre either side of a crown stranded a second crown two metres
+away, and relabelling the stems moved the count from one to two.
+
+Reaching the objective needs the whole cluster considered at once. Each
+distance gets an integer weight — a base larger than any achievable pair count,
+raised to a power that falls with distance, so no number of farther pairs can
+outweigh a single nearer one — and the exact optimum is a minimum-cost
+assignment. Candidates that share no stem cannot affect each other, so the
+graph is split into connected clusters first; on real inventories those are
+almost all a single crown and a single stem. The suite checks the result
+against brute-force enumeration of every possible pairing, and checks the
+counts under row permutation, identifier permutation, translation, rotation,
+reflection and transposition.
 
 Dominant height has an ordering rule of its own — diameter, then height, then
 identifier — so a tie at the 100-stems-per-hectare cutoff does not depend on

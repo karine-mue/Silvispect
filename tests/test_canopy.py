@@ -471,3 +471,21 @@ def test_edge_flag_agrees_with_the_component_it_labels():
                 include_edge_gaps=False,
             )
             assert len(kept) == sum(not gap.touches_edge for gap in gaps)
+
+
+def test_gap_fraction_is_exact_at_a_round_share():
+    """Three open cells in ten is three tenths, not a hair more.
+
+    Counted directly the answer is exactly representable; taken as one minus
+    the cover it is ``0.30000000000000004``, and a rule phrased as *above* a
+    30 % limit then fires on a plot sitting exactly on it.
+    """
+    chm = Grid.from_rows([[0.0] * 3 + [20.0] * 7])
+    assert gap_fraction(chm, threshold=2.0) == 0.3
+    assert gap_fraction(chm, threshold=2.0) + canopy_cover(chm, 2.0) == 1.0
+
+    for open_cells in range(0, 11):
+        rows = [[0.0] * open_cells + [20.0] * (10 - open_cells)]
+        assert gap_fraction(Grid.from_rows(rows), threshold=2.0) == open_cells / 10
+
+    assert gap_fraction(Grid.filled(2, 2, None), threshold=2.0) == 0.0

@@ -145,3 +145,40 @@ def test_detection_is_deterministic(stand):
     first = detect_trees(stand.chm)
     second = detect_trees(stand.chm)
     assert [crown.as_dict() for crown in first] == [crown.as_dict() for crown in second]
+
+
+def test_detection_work_is_bounded_by_the_raster_not_the_window():
+    """An implausible but accepted height must not make a tiny raster slow.
+
+    The search window grows with the height of the cell being tested, so a
+    height of 1e5 m asks for a radius of 5,501 cells.  On a one-cell raster
+    that is one comparison of real work; walking the whole requested square
+    spent sixteen seconds on it, and `inspect` runs detection before it can
+    report the implausible height at all.
+    """
+    import time
+
+    def elapsed(height: float) -> float:
+        grid = Grid.from_rows([[height]], cellsize=1.0)
+        start = time.perf_counter()
+        tops = find_treetops(grid)
+        assert len(tops) == 1 and tops[0].height == height
+        return time.perf_counter() - start
+
+    small = max(elapsed(10.0), 1e-6)
+    assert elapsed(1e5) / small < 50.0
+
+    # Ordinary detection is unchanged: a peak is still found, and it still
+    # suppresses every cell out to the window its own height buys — a 30 m
+    # tree searches 2 cells at this resolution.
+    grid = Grid.filled(9, 9, 5.0, cellsize=1.0)
+    grid.set(4, 4, 30.0)
+    found = {(top.row, top.col) for top in find_treetops(grid)}
+    assert (4, 4) in found
+    suppressed = {
+        (row, col)
+        for row in range(2, 7)
+        for col in range(2, 7)
+        if (row - 4) ** 2 + (col - 4) ** 2 <= 4 and (row, col) != (4, 4)
+    }
+    assert found & suppressed == set()

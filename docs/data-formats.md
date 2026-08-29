@@ -141,6 +141,21 @@ write_trees(live, "live-only.csv", precision=2)
 Output always uses the canonical column order, so a read/write round trip
 normalises a messy file.
 
+**Inventory CSV is a quantised record, not an exact copy.** Coordinates and
+measurements are written to `precision` decimals — three by default, a
+millimetre, which is finer than any field instrument reports and is the
+resolution a stem position is actually known to. Writing and reading back is
+therefore *not* an identity on the numbers: a stem at `x = 2.5004` is written
+as `2.5`, so a match tolerance of exactly `2.5 m` excludes it before the round
+trip and admits it afterwards. Raise `precision` if a downstream comparison
+needs a finer record than a millimetre.
+
+This is the opposite of the choice `silvispect chm` makes, and deliberately so.
+A derived canopy height model is an *intermediate* that the next command
+analyses, so it defaults to text that reads back as the same float; an
+inventory is a *record of measurements*, and writing more decimals than the
+measurement has claims a precision the field data does not carry.
+
 ## Threshold profiles — JSON
 
 A flat object of `InspectionConfig` field names to numbers. Any subset may be
