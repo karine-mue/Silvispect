@@ -76,6 +76,20 @@ def quadratic_mean_diameter(trees: Sequence[Tree]) -> float | None:
     return rms_of(diameters)
 
 
+def _basal_area_parts(dbh_cm: float) -> tuple[float, int]:
+    """Basal area in square metres as ``(mantissa, exponent)`` — never a float.
+
+    ``pi * (dbh / 200)^2`` with the diameter split into digits and a power of
+    two first: the digits are squared safely inside ``[0.25, 1)`` and the power
+    of two is doubled as an integer, so a diameter of any accepted size has a
+    weight the mean can use, where the float form underflows below about
+    5e-160 cm and overflows above about 1.5e156 cm.
+    """
+    digits, scale = math.frexp(dbh_cm / 200.0)
+    digits, extra = math.frexp(math.pi * digits * digits)
+    return digits, 2 * scale + extra
+
+
 def _shifted(digits: float, exponent: int) -> float:
     """``digits * 2**exponent``, reading a shift past the range as zero.
 
@@ -94,36 +108,31 @@ def lorey_height(trees: Sequence[Tree]) -> float | None:
     Weighting by basal area makes the statistic robust to the many small stems
     that dominate a raw arithmetic mean.
     """
-    weights: list[float] = []
-    heights: list[float] = []
-    for tree in trees:
-        area = tree.basal_area_m2
-        if area is None or tree.height_m is None or tree.height_m <= 0:
-            continue
-        weights.append(area)
-        heights.append(tree.height_m)
-    if not weights:
-        return None
-    # Scaling by the largest value on each side keeps the sums inside the
-    # finite range, but it destroys the other end of it: normalising a
-    # subnormal basal area by one of 1e307, or a 1e-308 height by the largest
-    # float, sends the term to zero and takes a representable answer with it —
-    # a pair whose weighted mean is 1e-308 came back as 0.
-    #
-    # So the exponent is carried separately from the digits.  ``frexp`` splits
-    # each value into a mantissa in [0.5, 1) and an integer power of two;
-    # multiplying mantissas cannot overflow or underflow, and the exponents add
-    # as plain integers however far apart they are.  Each sum is then taken in
-    # units of its own largest term, and the two scales are put back with a
-    # single ``ldexp`` at the end — which is the only place the answer is
-    # allowed to leave the range, and only if it truly does.
     numerators: list[tuple[float, int]] = []
     denominators: list[tuple[float, int]] = []
-    for weight, height in zip(weights, heights, strict=True):
-        weight_digits, weight_scale = math.frexp(weight)
-        height_digits, height_scale = math.frexp(height)
+    for tree in trees:
+        if tree.dbh_cm is None or tree.dbh_cm <= 0:
+            continue
+        if tree.height_m is None or tree.height_m <= 0:
+            continue
+        # The weight is never formed as a float.  Basal area is ``pi (D/200)^2``,
+        # and squaring a diameter of 2e-160 cm underflows to zero before any
+        # careful summation can see it — which not only lost that stem's
+        # weight but, because its enormous height still set the scale of the
+        # numerator, shifted the other stem's real contribution out of range
+        # and returned 0 for a mean of 7e-12.  Splitting the diameter with
+        # ``frexp`` first, the square is a mantissa product and a doubled
+        # exponent, and neither can leave the range.
+        weight_digits, weight_scale = _basal_area_parts(tree.dbh_cm)
+        height_digits, height_scale = math.frexp(tree.height_m)
         numerators.append((weight_digits * height_digits, weight_scale + height_scale))
         denominators.append((weight_digits, weight_scale))
+    if not numerators:
+        return None
+    # Each sum is taken in units of its own largest term, so overflow is
+    # impossible and only terms too small to change the sum are lost; the two
+    # scales are put back with a single ``ldexp`` at the end — the one place
+    # the answer is allowed to leave the range, and only if it truly does.
 
     top_scale = max(scale for _, scale in numerators)
     bottom_scale = max(scale for _, scale in denominators)

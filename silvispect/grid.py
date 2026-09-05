@@ -153,6 +153,20 @@ class Grid:
     values: list[Value] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        # The geometry is held to the same standard as the cells: everything
+        # here is written into the header of the file, and ``parse`` refuses a
+        # header it cannot read as a finite number.  A raster built in memory
+        # with a cell size of ``inf`` passed every analysis, was written out,
+        # and was then refused by the reader that had just been told about it.
+        for name in ("ncols", "nrows"):
+            count = getattr(self, name)
+            if isinstance(count, bool) or count != int(count):
+                raise GridError(f"{name} must be a whole number, got {count!r}")
+            setattr(self, name, int(count))
+        for name in ("xllcorner", "yllcorner", "cellsize", "nodata_value"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value):
+                raise GridError(f"{name} must be a finite number, got {value!r}")
         if self.ncols <= 0 or self.nrows <= 0:
             raise GridError("grid must have a positive number of rows and columns")
         if self.cellsize <= 0:

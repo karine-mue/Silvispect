@@ -30,12 +30,12 @@ lorey height      23.05 m
 dominant height   24.38 m
 volume/ha         289.38 m3
 canopy cover      63.6%
-gaps mapped       3
+gaps mapped       2
 detection         recall 98.8%, precision 100.0%
 
 findings (2 notice):
-  [-] SV012 stand         High open-canopy fraction: 36.4% of the plot is below 2.0 m, above the 30% limit.
-  [-] SV030 tree:T0072    Height-diameter outlier: Tree T0072 is 1.9 m taller than the FASY naslund curve predicts (z = +2.6); check for crown breakage or a transcription error.
+  [-] SV012 stand            High open-canopy fraction: 36.4% of the plot is below 2.0 m, above the 30% limit.
+  [-] SV030 tree:T0072       Height-diameter outlier: Tree T0072 is 1.9 m taller than the FASY naslund curve predicts (z = +2.6); check for crown breakage or a transcription error.
 ```
 
 ## Why
@@ -80,10 +80,9 @@ crown   min 2.8 m  mean 4.1 m  max 5.5 m
 
 # Map the canopy openings
 $ silvispect gaps data/plot-a1-chm.asc
-3 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        160 m2  width  11.6 m  centre (612525.5, 6642009.3)  [edge]
-  gap 2         44 m2  width   5.1 m  centre (612545.5, 6642035.5)  [edge]
-  gap 3         27 m2  width   5.1 m  centre (612509.6, 6642019.4)  [edge]
+2 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
+  gap 1        156 m2  width  11.6 m  centre (612525.6, 6642009.3)  [edge]
+  gap 2         26 m2  width   5.3 m  centre (612509.5, 6642019.9)  [edge]
 
 # Compare the detections against the field record
 $ silvispect match data/plot-a1-trees.csv --chm data/plot-a1-chm.asc

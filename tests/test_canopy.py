@@ -7,7 +7,6 @@ import math
 import pytest
 
 from silvispect.canopy import (
-    _canopy_distance_field,
     _opened_gap_mask,
     canopy_cover,
     canopy_height_model,
@@ -350,14 +349,9 @@ def test_opening_field_is_equivariant_under_rotation():
         chm = Grid.filled(9, 7, 0.0, cellsize=1.0)
         for row, col in chm.cells():
             chm.set(row, col, 20.0 if rng.random() < 0.3 else 0.0)
+        before = opening_radius_field(chm, threshold=2.0)
         field = Grid.from_rows(
-            [
-                [
-                    opening_radius_field(chm, threshold=2.0)[r * chm.ncols + c]
-                    for c in range(chm.ncols)
-                ]
-                for r in range(chm.nrows)
-            ]
+            [[before[r * chm.ncols + c] for c in range(chm.ncols)] for r in range(chm.nrows)]
         )
         turned = _rotate_quarter(chm)
         after = opening_radius_field(turned, threshold=2.0)
@@ -369,29 +363,86 @@ def test_opening_field_is_the_union_of_every_disc_that_fits():
 
     This is the invariant behind the reflection and rotation checks: no disc
     that fits inside the opening may be dropped, whatever order the scan visits
-    the cells in and whatever bookkeeping it uses to stay cheap.
+    the cells in and whatever bookkeeping it uses to stay cheap.  The oracle
+    shares nothing with the code: it samples circle centres densely, keeps
+    those whose clearance (measured from the definition) reaches the cell
+    centre, and brackets the true value using only that clearance is
+    1-Lipschitz.  Every cell must land in its bracket.
     """
     import random
 
     rng = random.Random(505)
-    for _ in range(60):
-        nrows, ncols = rng.randint(1, 9), rng.randint(1, 9)
-        chm = Grid.filled(nrows, ncols, 0.0, cellsize=rng.choice([0.5, 1.0, 3.0]))
+    grid = 16
+    slack = math.sqrt(2.0) / (2.0 * grid)
+    for _ in range(40):
+        nrows, ncols = rng.randint(1, 8), rng.randint(1, 8)
+        cellsize = rng.choice([0.5, 1.0, 3.0])
+        chm = Grid.filled(nrows, ncols, 0.0, cellsize=cellsize)
         chm.values = [
             None if rng.random() < 0.08 else rng.uniform(0.0, 6.0) for _ in range(nrows * ncols)
         ]
-        distances = _canopy_distance_field(chm, 2.0)
-        expected = [0.0] * len(chm.values)
-        for centre, value in enumerate(chm.values):
-            if value is None or value >= 2.0 or distances[centre] <= 0.0:
+        blocked = [value is None or value >= 2.0 for value in chm.values]
+        samples: list[tuple[float, float, float]] = []
+        for index, is_blocked in enumerate(blocked):
+            if is_blocked:
                 continue
-            crow, ccol = divmod(centre, ncols)
-            for position in range(len(chm.values)):
-                prow, pcol = divmod(position, ncols)
-                offset = math.hypot((prow - crow) * chm.cellsize, (pcol - ccol) * chm.cellsize)
-                if offset <= distances[centre] and expected[position] < distances[centre]:
-                    expected[position] = distances[centre]
-        assert opening_radius_field(chm, threshold=2.0) == expected
+            row, col = divmod(index, ncols)
+            for i in range(grid + 1):
+                for j in range(grid + 1):
+                    x, y = col + j / grid, row + i / grid
+                    samples.append((x, y, _clearance(blocked, nrows, ncols, x, y)))
+        field = opening_radius_field(chm, threshold=2.0)
+        for index, is_blocked in enumerate(blocked):
+            if is_blocked:
+                assert field[index] == 0.0
+                continue
+            row, col = divmod(index, ncols)
+            px, py = col + 0.5, row + 0.5
+            # Any circle that covers the centre has a sample within half a
+            # sample diagonal of its own centre; that sample's clearance is
+            # at most that much smaller and reaches at most that much less far.
+            low = max((d for x, y, d in samples if math.hypot(x - px, y - py) <= d), default=0.0)
+            high = (
+                max(
+                    (d for x, y, d in samples if math.hypot(x - px, y - py) <= d + 2.0 * slack),
+                    default=0.0,
+                )
+                + slack
+            )
+            value = field[index] / cellsize
+            assert low - 1e-9 <= value <= high + 1e-9, (chm.values, index, value, low, high)
+
+
+@pytest.mark.parametrize("nrows,ncols", [(1, 1), (2, 2), (3, 3), (4, 6), (5, 5), (3, 8), (7, 2)])
+def test_opening_field_of_a_treeless_plot_in_closed_form(nrows, ncols):
+    """On an empty rectangle the largest circle covering a cell is known exactly.
+
+    It is either the circle filling the short side — which can slide along
+    the long axis, so it covers everything within its radius of that run — or
+    a circle wedged into the nearest corner and passing through the cell
+    centre, whose radius solves ``(r - a)^2 + (r - b)^2 = r^2`` for the cell's
+    distances ``a`` and ``b`` to the two walls of that corner.
+    """
+    chm = Grid.filled(nrows, ncols, 0.0, cellsize=1.0)
+    field = opening_radius_field(chm, threshold=2.0)
+    half = min(nrows, ncols) / 2.0
+    for row in range(nrows):
+        for col in range(ncols):
+            px, py = col + 0.5, row + 0.5
+            # The sliding circle's run of centres.
+            run_x = (max(half, px), min(ncols - half, px)) if ncols > nrows else (half, half)
+            run_y = (max(half, py), min(nrows - half, py)) if nrows > ncols else (half, half)
+            run_x = (min(run_x), max(run_x))
+            run_y = (min(run_y), max(run_y))
+            near_x = min(max(px, half), ncols - half)
+            near_y = min(max(py, half), nrows - half)
+            expected = half if math.hypot(px - near_x, py - near_y) <= half + 1e-12 else 0.0
+            for a in (px, ncols - px):
+                for b in (py, nrows - py):
+                    for root in (a + b - math.sqrt(2 * a * b), a + b + math.sqrt(2 * a * b)):
+                        if root <= half + 1e-12:
+                            expected = max(expected, root)
+            assert field[row * ncols + col] == pytest.approx(expected, rel=1e-12), (row, col)
 
 
 def test_opening_field_cost_grows_with_the_raster_not_the_discs():
@@ -695,3 +746,258 @@ def test_a_raster_cannot_hold_a_value_a_file_cannot():
         with pytest.raises(GridError, match="finite"):
             Grid.filled(1, 1, bad)
     assert Grid.from_rows([[1.0, None]]).values == [1.0, None]
+
+
+# ----------------------------------------------------------------------
+# the width is the largest circle that fits, exactly
+# ----------------------------------------------------------------------
+def _clearance(blocked, nrows, ncols, x, y):
+    """Independent oracle: Euclidean distance to the nearest blocked square or edge.
+
+    Written from the definition — the nearest point of each canopy square, and
+    the plot boundary — with no transform, walk or envelope in it.
+    """
+    best = min(x, ncols - x, y, nrows - y)
+    for row in range(nrows):
+        for col in range(ncols):
+            if not blocked[row * ncols + col]:
+                continue
+            dx = max(0.0, col - x, x - (col + 1))
+            dy = max(0.0, row - y, y - (row + 1))
+            best = min(best, math.hypot(dx, dy))
+    return best
+
+
+def _sampled_radius(blocked, nrows, ncols, members, grid=24):
+    """A lower bound on the largest inscribed circle, and how far it can be off.
+
+    The clearance is sampled on a fine lattice over the member cells.  It is a
+    1-Lipschitz function, so the true maximum lies within half a lattice
+    diagonal of the best sample: the pair returned brackets it.
+    """
+    best = 0.0
+    for index in members:
+        row, col = divmod(index, ncols)
+        for i in range(grid + 1):
+            for j in range(grid + 1):
+                best = max(best, _clearance(blocked, nrows, ncols, col + j / grid, row + i / grid))
+    return best, best + math.sqrt(2.0) / (2.0 * grid)
+
+
+def _plot(rows, cellsize=1.0):
+    return Grid.from_rows([[9.0 if v else 0.0 for v in row] for row in rows], cellsize=cellsize)
+
+
+def _box(height, width, pad=1):
+    rows = [[1] * (width + 2 * pad) for _ in range(height + 2 * pad)]
+    for row in range(pad, pad + height):
+        for col in range(pad, pad + width):
+            rows[row][col] = 0
+    return rows
+
+
+def _plus(arm):
+    size = 2 * arm + 1 + 2
+    rows = [[1] * size for _ in range(size)]
+    middle = size // 2
+    for offset in range(-arm, arm + 1):
+        rows[middle][middle + offset] = 0
+        rows[middle + offset][middle] = 0
+    return rows
+
+
+def _cross_of_squares():
+    """A 3x3 block with one cell added to the middle of each side."""
+    rows = [[1] * 7 for _ in range(7)]
+    for row in range(2, 5):
+        for col in range(2, 5):
+            rows[row][col] = 0
+    for row, col in ((1, 3), (5, 3), (3, 1), (3, 5)):
+        rows[row][col] = 0
+    return rows
+
+
+#: Openings whose largest inscribed circle is known in closed form, in cells.
+ANALYTIC = [
+    ("1x1", _box(1, 1), 1.0),
+    ("2x2", _box(2, 2), 2.0),
+    ("3x3", _box(3, 3), 3.0),
+    ("4x4", _box(4, 4), 4.0),
+    ("5x5", _box(5, 5), 5.0),
+    ("2x5", _box(2, 5), 2.0),
+    ("3x6", _box(3, 6), 3.0),
+    ("4x7", _box(4, 7), 4.0),
+    ("1x7 corridor", _box(1, 7), 1.0),
+    ("2x9 corridor", _box(2, 9), 2.0),
+    ("plus of single cells", _plus(1), math.sqrt(2.0)),
+    ("plus of arms of two", _plus(2), math.sqrt(2.0)),
+    ("3x3 with a cell on each side", _cross_of_squares(), math.sqrt(10.0)),
+    (
+        "L of three cells",
+        [[1, 1, 1, 1], [1, 0, 0, 1], [1, 0, 1, 1], [1, 1, 1, 1]],
+        4.0 - 2.0 * math.sqrt(2.0),
+    ),
+    ("single cell in the plot corner", [[0, 1, 1], [1, 1, 1], [1, 1, 1]], 1.0),
+    ("2x2 in the plot corner", [[0, 0, 1], [0, 0, 1], [1, 1, 1]], 2.0),
+    ("2x2 against the plot edge", [[1, 0, 0, 1], [1, 0, 0, 1], [1, 1, 1, 1]], 2.0),
+    ("two cells touching at a corner", [[0, 1], [1, 0]], 1.0),
+]
+
+
+@pytest.mark.parametrize("cellsize", [0.25, 1.0, 4.0])
+@pytest.mark.parametrize("name,rows,diameter", ANALYTIC, ids=[case[0] for case in ANALYTIC])
+def test_gap_width_is_the_largest_inscribed_circle_exactly(name, rows, diameter, cellsize):
+    """Squares, rectangles, corridors, crosses and corners, by closed form.
+
+    Two things about that circle are easy to get wrong on a grid, and both
+    were.  Its centre need not be a cell centre — the circle that fills a 2x2
+    block sits on the corner where the four cells meet, and read at cell
+    centres the block was one cell wide.  And its radius is a Euclidean
+    distance, not a walk — a chamfer measures a knight's move as
+    ``1 + sqrt(2)`` where the crow flies ``sqrt(5)``, so a 3x3 block with a
+    cell on each side claimed a 3.41-cell circle where 3.16 is the largest that
+    fits.  The expected values here are geometry, not the implementation.
+    """
+    plot = _plot(rows, cellsize)
+    gaps = find_gaps(plot, threshold=2.0, min_area=0.0, min_width=0.0)
+    assert len(gaps) == 1, name
+    assert gaps[0].width == pytest.approx(diameter * cellsize, rel=1e-9)
+
+    # The filter decides on the same circle: just under keeps, just over drops.
+    below = find_gaps(plot, threshold=2.0, min_area=0.0, min_width=diameter * cellsize * (1 - 1e-6))
+    above = find_gaps(plot, threshold=2.0, min_area=0.0, min_width=diameter * cellsize * (1 + 1e-6))
+    assert len(below) == 1, name
+    assert above == [], name
+
+
+def test_an_even_sided_opening_keeps_its_whole_width():
+    """The reported case: a 2x2 block is a two-metre square.
+
+    Its largest circle is centred where the four cells meet, as far from every
+    cell centre as a point can be; the field read at cell centres alone gave
+    it half its width and a 1.5 m filter rejected it.
+    """
+    plot = _plot(_box(2, 2))
+    assert [gap.width for gap in find_gaps(plot, threshold=2.0, min_area=0.0, min_width=0.0)] == [
+        pytest.approx(2.0)
+    ]
+    kept = find_gaps(plot, threshold=2.0, min_area=0.0, min_width=1.5)
+    assert len(kept) == 1 and len(kept[0].cells) == 4
+
+    # A corridor of even width is retained in full at exactly its width: the
+    # circle slides along the midline, and every position is painted.
+    corridor = _plot(_box(2, 9))
+    kept = find_gaps(corridor, threshold=2.0, min_area=0.0, min_width=2.0)
+    assert len(kept) == 1 and len(kept[0].cells) == 18
+
+
+def test_an_oblique_boundary_is_measured_as_the_crow_flies():
+    """The reported case: a 3x3 block with one cell added to each side.
+
+    From the centre the nearest walls are the corners of the cells diagonal to
+    the arms, a knight's move away: ``sqrt(2.5)`` cells, for a circle of
+    diameter ``sqrt(10)``.  The chamfer walk reached those corners in a
+    straight step and a diagonal one, ``1 + sqrt(2)/2``, and reported 3.41 m.
+    """
+    plot = _plot(_cross_of_squares())
+    (gap,) = find_gaps(plot, threshold=2.0, min_area=0.0, min_width=0.0)
+    assert gap.width == pytest.approx(math.sqrt(10.0))
+    assert find_gaps(plot, threshold=2.0, min_area=0.0, min_width=3.3) == []
+    assert len(find_gaps(plot, threshold=2.0, min_area=0.0, min_width=3.1)) == 1
+
+
+def test_the_distance_field_is_exact_euclidean_at_every_cell():
+    """No octile approximation anywhere: every cell agrees with the definition."""
+    import random
+
+    rng = random.Random(1201)
+    for _ in range(40):
+        nrows, ncols = rng.randint(1, 9), rng.randint(1, 9)
+        cellsize = rng.choice([0.5, 1.0, 2.0])
+        chm = Grid.filled(nrows, ncols, 0.0, cellsize=cellsize)
+        chm.values = [
+            None if rng.random() < 0.05 else rng.choice([0.0, 0.0, 9.0])
+            for _ in range(nrows * ncols)
+        ]
+        blocked = [value is None or value >= 2.0 for value in chm.values]
+        field = distance_to_canopy(chm, threshold=2.0)
+        for index in range(len(chm.values)):
+            if blocked[index]:
+                continue
+            row, col = divmod(index, ncols)
+            expected = _clearance(blocked, nrows, ncols, col + 0.5, row + 0.5) * cellsize
+            assert field.values[index] == pytest.approx(expected, rel=1e-12, abs=1e-12)
+
+
+def test_gap_width_on_irregular_openings_is_certified_and_bounded():
+    """Random unions of cells, against an oracle that shares nothing with the code.
+
+    The circle the implementation reports is checked two ways.  Its centre is
+    handed to the definition, which must find exactly that much clearance
+    there — so the circle really fits.  And the clearance is sampled densely
+    over the gap; being 1-Lipschitz, the true maximum lies within half a
+    sample diagonal of the best sample, so the report must fall in that
+    bracket — so no larger circle was missed.
+    """
+    import random
+
+    from silvispect.geometry import Walls, distance_field, inscribed_circle
+
+    rng = random.Random(4711)
+    checked = 0
+    for _ in range(50):
+        nrows, ncols = rng.randint(2, 7), rng.randint(2, 7)
+        rows = [[1 if rng.random() < 0.35 else 0 for _ in range(ncols)] for _ in range(nrows)]
+        blocked = [bool(v) for row in rows for v in row]
+        if all(blocked):
+            continue
+        plot = _plot(rows)
+        cells = distance_field(blocked, nrows, ncols)
+        walls = Walls(blocked, nrows, ncols)
+        for gap in find_gaps(plot, threshold=2.0, min_area=0.0, min_width=0.0):
+            members = [r * ncols + c for r, c in gap.cells]
+            disc = inscribed_circle(walls, cells, members)
+            x, y = (disc.x1 + disc.x2) / 2.0, (disc.y1 + disc.y2) / 2.0
+            assert _clearance(blocked, nrows, ncols, x, y) == pytest.approx(disc.radius, abs=1e-8)
+            assert gap.width == pytest.approx(2.0 * disc.radius)
+            low, high = _sampled_radius(blocked, nrows, ncols, members)
+            assert low - 1e-9 <= disc.radius <= high + 1e-9, (rows, gap.cells)
+            checked += 1
+    assert checked > 60
+
+
+def test_gap_widths_transform_with_the_plot():
+    """A gap is a shape on the ground; turning the plot cannot resize it."""
+    import random
+
+    rng = random.Random(2718)
+    for _ in range(30):
+        nrows, ncols = rng.randint(2, 7), rng.randint(2, 7)
+        rows = [[rng.choice([0.0, 0.0, 9.0]) for _ in range(ncols)] for _ in range(nrows)]
+        images = [
+            rows,
+            [row[::-1] for row in rows],
+            rows[::-1],
+            [list(col) for col in zip(*rows, strict=True)],
+            [list(col) for col in zip(*rows[::-1], strict=True)],
+        ]
+        widths = [
+            sorted(
+                round(gap.width, 9)
+                for gap in find_gaps(
+                    Grid.from_rows(image, cellsize=0.5), threshold=2.0, min_area=0.0, min_width=0.0
+                )
+            )
+            for image in images
+        ]
+        assert all(w == widths[0] for w in widths), rows
+        # And the filter's decisions, on the same geometry.
+        kept = [
+            len(
+                find_gaps(
+                    Grid.from_rows(image, cellsize=0.5), threshold=2.0, min_area=0.0, min_width=1.0
+                )
+            )
+            for image in images
+        ]
+        assert all(k == kept[0] for k in kept), rows

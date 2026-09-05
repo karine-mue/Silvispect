@@ -19,7 +19,7 @@ a correction to behaviour that was wrong. Two of them are visible in output —
 decimals, and gains an optional `--precision` to round on request — but neither
 is a new capability. The rounding was the defect.
 
-Nine rounds of review after the release found these. As before, each fix
+Ten rounds of review after the release found these. As before, each fix
 carries a test that fails against the code as it stood — and where the defect
 violated a general property, that property is what the test asserts, over
 randomized inputs rather than the one raster that exposed it.
@@ -351,6 +351,62 @@ than a defect: `precision` is a documented parameter, an inventory is a record
 of measurements rather than an intermediate to be re-analysed, and a millimetre
 is finer than any field instrument reports. `docs/data-formats.md` now says so
 outright, and a test pins it.
+
+Tenth round — a closing review found five defects, two of them one defect seen
+twice:
+
+- **Gap width was still not the width of the widest circle that fits.** Two
+  approximations were left in the measurement, and neither shrinks with
+  resolution. Circle centres were taken only at cell centres, so a block of
+  four open 1 m cells — a square two metres across — reported a width of 1.0 m
+  and was rejected by a 1.5 m minimum, though the circle filling it is centred
+  on the lattice corner where the four cells meet, as far from every cell
+  centre as a point can be. And distances were propagated by a chamfer walk,
+  one cell straight and `sqrt(2)` diagonally, which measures a knight's move as
+  `1 + sqrt(2)` where the crow flies `sqrt(5)`: a 3x3 opening with one cell
+  added on each side claimed 3.41 m and survived a 3.3 m minimum where
+  `sqrt(10)` = 3.16 m is the largest circle that fits.
+
+  Both are gone, not corrected. The geometry is now taken as what it is — the
+  union of the open cells' squares, bounded by the canopy cells and the plot
+  edge. Distances to it are an exact separable Euclidean transform, and the
+  circles are found in closed form: a circle inside a rectilinear region is
+  held by the walls it touches, so every way of holding one is a small solve
+  over wall lines and reflex corners. The largest is one of them, and the
+  opening function needs one family more — a circle held by two walls *and*
+  the cell it must cover, which sits at no local maximum and so appears in no
+  enumeration of pinned circles. Each solve is done in offsets from the cell
+  it concerns, so the answer is bit-identical however the raster is turned.
+
+  **Reported widths change on the sample plot**, in both directions, and the
+  gap count with them. The raw sub-canopy components measure 11.63/5.15/4.10 m
+  where they measured 11.61/5.12/3.74 m; after the 5 m opening two gaps remain
+  at 155.5 m2 / 11.63 m and 26.5 m2 / 5.27 m, where three were reported at
+  159.5/11.61, 44.5/5.12 and 27.0/5.12. The 44.5 m2 gap was the width error
+  itself: measured exactly, the part of it that admits a 5 m circle is 21.2 m2
+  and falls below the 25 m2 minimum area, and it is listed again by
+  `--min-area 0`. The demo stand maps 12 gaps where it mapped 10. Exactness
+  costs time: mapping the sample plot's gaps takes 0.25 s where it took
+  0.09 s, and the synthetic stand 1.1 s where it took 0.4 s.
+- **Lorey's height still underflowed, one layer further down.** The ninth round
+  carried the exponents of the weighted sum, but the weight itself was formed
+  as an ordinary float: a basal area of `pi (d/200)^2` for a diameter of
+  2e-160 cm is zero before any exponent can be carried, so a stand of that stem
+  beside an ordinary one returned 0.0 for a mean the arithmetic can hold. The
+  weight is now built as a mantissa and a power of two from the diameter's own,
+  which squares an exponent instead of a number, and neither end of the float
+  range is lost.
+- **A grid could be built with geometry its own reader refuses.** `Grid.parse`
+  has always rejected a header it cannot read back, but the other constructors
+  checked only the cells: `canopy_height_model` on a grid whose `cellsize` was
+  infinite returned a grid that could be written and never re-read. Every
+  header field — the cell size, both origin coordinates and the nodata
+  sentinel — must now be finite, and the row and column counts whole, in all
+  four constructors alike.
+- The documentation still described the superseded tie-break for tied
+  detection candidates, alongside the canonical orientation that replaced it.
+  The current rule is stated once, and the two earlier ones are kept as
+  labelled history.
 
 ## 0.1.0 — 2026-08-17
 

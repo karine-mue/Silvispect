@@ -473,3 +473,55 @@ def test_a_diameter_class_narrower_than_the_record_is_refused():
     (extreme,) = diameter_distribution(widest, class_width=MIN_CLASS_WIDTH_CM)
     low, high = (Decimal(part) for part in extreme.split("-"))
     assert low <= Decimal(repr(MAX_DBH_CM)) < high
+
+
+def _lorey_from_diameters(pairs):
+    """The oracle from the definition, with the square taken in decimal."""
+    with decimal.localcontext() as context:
+        context.prec = 400
+        pi = decimal.Decimal(math.pi)
+        top = sum(pi * (decimal.Decimal(d) / 200) ** 2 * decimal.Decimal(h) for d, h in pairs)
+        bottom = sum(pi * (decimal.Decimal(d) / 200) ** 2 for d, _ in pairs)
+        return top / bottom
+
+
+@pytest.mark.parametrize(
+    "pairs",
+    [
+        [(2e-160, sys.float_info.max), (1.0, 1e-20)],
+        [(1e-159, sys.float_info.max), (1e156, 1e-308)],
+        [(2e-160, 1.0), (2e-160, 3.0)],
+        [(3e-160, 1e-300), (1.0, 1e-320)],
+        [(1e-170, 25.0), (30.0, 25.0), (1e150, 25.0)],
+        [(1e155, sys.float_info.max), (1e155, sys.float_info.max)],
+        [(1e-165, 1e300), (1e-165, 1e-300)],
+        [(20.0, 15.0), (40.0, 25.0), (12.5, 9.0)],
+    ],
+)
+def test_lorey_height_never_forms_the_basal_area_as_a_float(pairs):
+    """The weight of a stem is carried as digits and an exponent, never a float.
+
+    Squaring a diameter of 2e-160 cm underflows to zero before any careful
+    summation can see it — and because that stem's enormous height still set
+    the scale of the numerator, the other stem's real contribution was shifted
+    out of range too, and a mean of 7e-12 came back as 0.  Every case here has
+    a positive, representable answer, and the oracle takes the square in
+    decimal at 400 digits.
+    """
+    trees = [
+        Tree(tree_id=str(index), x=float(index), y=0.0, dbh_cm=d, height_m=h)
+        for index, (d, h) in enumerate(pairs)
+    ]
+    value = lorey_height(trees)
+    expected = float(_lorey_from_diameters(pairs))
+    assert value is not None and math.isfinite(value) and value > 0.0
+    assert value == pytest.approx(expected, rel=1e-12)
+    assert lorey_height(list(reversed(trees))) == value
+
+
+def test_lorey_height_reported_case():
+    trees = [
+        Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=2e-160, height_m=sys.float_info.max),
+        Tree(tree_id="b", x=1.0, y=0.0, dbh_cm=1.0, height_m=1e-20),
+    ]
+    assert lorey_height(trees) == pytest.approx(7.1907725494492624e-12, rel=1e-12)

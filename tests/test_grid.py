@@ -482,3 +482,56 @@ def test_corner_and_centre_origins_cannot_both_be_given(axis):
         Grid.parse(header + "1\n")
     centred = Grid.parse(f"ncols 1\nnrows 1\ncellsize 2\n{axis}llcenter 10\n1\n")
     assert getattr(centred, f"{axis}llcorner") == 9.0
+
+
+@pytest.mark.parametrize("field", ["cellsize", "xllcorner", "yllcorner", "nodata_value"])
+@pytest.mark.parametrize("bad", [math.inf, -math.inf, math.nan])
+def test_grid_geometry_is_held_to_the_same_standard_as_its_cells(field, bad):
+    """A raster the reader would refuse is refused at construction.
+
+    Cells were checked; the header was not.  A canopy model derived from two
+    grids with a cell size of ``inf`` came back with finite heights and an
+    infinite cell, was written out, and was then refused by ``parse`` — which
+    has always demanded finite header numbers.  Every public constructor now
+    agrees with it.
+    """
+    with pytest.raises(GridError, match="finite"):
+        Grid.from_rows([[5.0]], **{field: bad})
+    with pytest.raises(GridError, match="finite"):
+        Grid.filled(1, 1, 5.0, **{field: bad})
+    keywords = {"ncols": 1, "nrows": 1, "xllcorner": 0.0, "yllcorner": 0.0, "cellsize": 1.0}
+    keywords[field] = bad
+    with pytest.raises(GridError, match="finite"):
+        Grid(**keywords, values=[5.0])
+
+
+def test_a_grid_that_can_be_built_can_be_written_and_read_back():
+    """The round trip is the contract every constructor is now measured by."""
+    from silvispect.canopy import canopy_height_model
+
+    dsm = Grid.from_rows(
+        [[5.0, 6.0]], cellsize=0.25, xllcorner=1e6, yllcorner=-2.5, nodata_value=-1
+    )
+    dtm = Grid.from_rows(
+        [[1.0, None]], cellsize=0.25, xllcorner=1e6, yllcorner=-2.5, nodata_value=-1
+    )
+    chm = canopy_height_model(dsm, dtm)
+    again = Grid.parse(chm.to_text(precision=None))
+    assert again.values == chm.values == [4.0, None]
+    assert (again.cellsize, again.xllcorner, again.yllcorner, again.nodata_value) == (
+        chm.cellsize,
+        chm.xllcorner,
+        chm.yllcorner,
+        chm.nodata_value,
+    )
+
+
+def test_grid_dimensions_are_whole_numbers():
+    """A whole-valued float is a count and is stored as one; a fraction is not."""
+    grid = Grid(ncols=2.0, nrows=1.0, xllcorner=0.0, yllcorner=0.0, cellsize=1.0, values=[1.0, 2.0])
+    assert (grid.ncols, grid.nrows) == (2, 1)
+    assert isinstance(grid.ncols, int) and isinstance(grid.nrows, int)
+    with pytest.raises(GridError, match="whole number"):
+        Grid(ncols=2, nrows=1.5, xllcorner=0.0, yllcorner=0.0, cellsize=1.0)
+    with pytest.raises(GridError):
+        Grid(ncols=True, nrows=1, xllcorner=0.0, yllcorner=0.0, cellsize=1.0)
