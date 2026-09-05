@@ -506,7 +506,7 @@ STRICT_RULES = [
     ("min_sdi", "SV003", 1e9, {"max_sdi": 1e12}),
     ("max_sdi", "SV004", 0.0, {"min_sdi": 0.0}),
     ("min_canopy_cover", "SV010", 1.0, {}),
-    ("max_gap_area", "SV011", 0.0, {}),
+    ("max_gap_area", "SV011", 0.0, {"min_gap_area": 0.0}),
     ("max_gap_fraction", "SV012", 0.0, {}),
     ("min_gini", "SV020", 1e9, {}),
     ("min_shannon", "SV021", 1e9, {}),
@@ -650,3 +650,68 @@ def test_a_finding_never_prints_the_two_numbers_it_compared_as_one():
     assert "100 stems/ha is below the minimum of 200 stems/ha" in next(
         f.detail for f in plain.findings if f.code == "SV001"
     )
+
+
+# ----------------------------------------------------------------------
+# nothing observed means nothing measured, everywhere
+# ----------------------------------------------------------------------
+def test_an_unobserved_raster_makes_no_claim_about_a_field_inventory():
+    """Matching a field list against an empty detection is not a comparison.
+
+    Detection over an all-nodata raster returns no crowns, and matching those
+    against a real inventory reported every stem as an omission — a warning
+    that the sensor missed them, from a sensor that had never seen anything.
+    On a ``--fail-on warning`` run that failed the build.
+    """
+    blank = Grid.filled(2, 2, None, cellsize=0.5)
+    trees = [Tree(tree_id="T", x=0.5, y=0.5, dbh_cm=10.0, height_m=10.0)]
+    report = inspect_stand(chm=blank, trees=trees)
+
+    assert report.match is None
+    assert {"SV050", "SV051", "SV052"}.isdisjoint(codes(report))
+    assert report.metrics_source == "field"
+
+
+def test_an_unobserved_raster_reports_no_canopy_numbers():
+    """Cover, open fraction, rugosity and gap count are observations too.
+
+    Each of them came back as a numeric zero for a plot nobody had looked at,
+    which reads as a measured absence rather than a missing measurement.
+    """
+    blank = Grid.filled(4, 4, None, cellsize=0.5)
+    report = inspect_stand(chm=blank, area_ha=0.01)
+
+    payload = report.as_dict()
+    assert payload["canopy"] == {}
+    assert "detection" not in payload
+    assert "match" not in payload
+    assert "gaps" not in payload
+    assert report.gaps == []
+    assert json.loads(json.dumps(payload, allow_nan=False))["metrics_source"] == "none"
+
+    # One valid cell is an observation, and then every block is populated.
+    seen = Grid.filled(4, 4, None, cellsize=0.5)
+    seen.set(1, 1, 1.0)
+    populated = inspect_stand(chm=seen, area_ha=0.01).as_dict()
+    assert populated["canopy"]["cover"] == 0.0
+    assert "detection" in populated
+
+
+def test_a_reporting_floor_may_not_sit_above_the_limit_it_feeds():
+    """SV011 cannot report a gap that ``min_gap_area`` has already deleted.
+
+    A floor of 101 m2 against a limit of 50 m2 removed a 100 m2 opening before
+    the rule saw it, and the inspection came back clean — the configuration
+    silenced exactly the finding it was meant to raise.
+    """
+    with pytest.raises(ValueError, match="min_gap_area must not exceed max_gap_area"):
+        InspectionConfig(min_gap_area=101.0, max_gap_area=50.0)
+    with pytest.raises(ValueError, match="min_gap_area must not exceed max_gap_area"):
+        InspectionConfig.from_dict({"min_gap_area": 101.0, "max_gap_area": 50.0})
+
+    # The same plot, with a floor the limit can live with, is critical.
+    plot = Grid.from_rows([[9.0, 9.0, 9.0], [9.0, 0.0, 9.0], [9.0, 9.0, 9.0]], cellsize=10.0)
+    config = InspectionConfig(min_gap_area=50.0, max_gap_area=50.0, min_gap_width=0.0)
+    report = inspect_stand(chm=plot, config=config, run_detection=False)
+    assert "SV011" in codes(report)
+    assert report.max_severity is Severity.CRITICAL

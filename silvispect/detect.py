@@ -72,6 +72,10 @@ class DetectionConfig:
             value = getattr(self, name)
             if value != int(value):
                 raise GridError(f"{name} must be a whole number of cells, got {value!r}")
+            # A whole-valued float is a whole number of cells, so it is stored
+            # as one.  Accepting 1.0 and then handing it to ``range`` raised a
+            # TypeError from inside detection instead.
+            object.__setattr__(self, name, int(value))
         if self.min_height < 0:
             raise GridError("min_height must be non-negative")
         if self.smooth_radius < 0:
@@ -199,7 +203,12 @@ def crown_radius_limit(height: float, config: DetectionConfig) -> float:
     return config.crown_intercept + config.crown_slope * max(height, 0.0)
 
 
-def find_treetops(chm: Grid, config: DetectionConfig | None = None) -> list[TreeTop]:
+def find_treetops(
+    chm: Grid,
+    config: DetectionConfig | None = None,
+    *,
+    reference: Grid | None = None,
+) -> list[TreeTop]:
     """Locate local maxima using a height-dependent search window.
 
     A cell is a candidate apex unless a **strictly higher** cell lies inside
@@ -215,8 +224,17 @@ def find_treetops(chm: Grid, config: DetectionConfig | None = None) -> list[Tree
     crown top is one tree, not twenty.  Its apex is the candidate nearest the
     run's centre, and where two are equally near the denser surroundings win —
     both of which mirror with the raster, unlike a row-major first.
+
+    ``reference`` is the raster the surroundings are read from when candidates
+    tie, and defaults to ``chm`` itself.  It exists because smoothing can erase
+    the very difference the tie needs: the mean filter turns ``2 3 / 4 9 /
+    3 2`` into a surface that is its own mirror image, leaving two equal maxima
+    that nothing in it can tell apart, while the raster it came from tells them
+    apart easily.  Detection therefore breaks its ties on the observations
+    rather than on the intermediate surface.
     """
     config = config or DetectionConfig()
+    reference = chm if reference is None else reference
     candidates: list[tuple[int, int, float]] = []
     for row, col, height in chm.valid_cells():
         if height < config.min_height:
@@ -247,8 +265,8 @@ def find_treetops(chm: Grid, config: DetectionConfig | None = None) -> list[Tree
                 seen.add((nrow, ncol))
                 plateau.append((nrow, ncol))
                 queue.append((nrow, ncol))
-        tops.append(_plateau_apex(chm, plateau, height, len(tops) + 1))
-    return _ranked(chm, tops)
+        tops.append(_plateau_apex(chm, plateau, height, len(tops) + 1, reference))
+    return _ranked(reference, tops)
 
 
 def _ranked(chm: Grid, tops: list[TreeTop]) -> list[TreeTop]:
@@ -298,6 +316,7 @@ def _plateau_apex(
     plateau: list[tuple[int, int]],
     height: float,
     tree_id: int,
+    reference: Grid | None = None,
 ) -> TreeTop:
     """Pick the one cell of an equal-height run that represents the treetop.
 
@@ -326,7 +345,8 @@ def _plateau_apex(
     if len(central) == 1:
         row, col = central[0]
     else:
-        row, col = min(central, key=lambda cell: (_outlook(chm, cell), cell))
+        outlook_of = chm if reference is None else reference
+        row, col = min(central, key=lambda cell: (_outlook(outlook_of, cell), cell))
     x, y = chm.cell_center(row, col)
     return TreeTop(tree_id, row, col, x, y, height)
 
@@ -386,8 +406,12 @@ def segment_crowns(
             value = chm.values[idx]
             if value is None or value < floor:
                 continue
-            if value > parent_height + 1e-9:
-                # Rising again: we have crossed into a neighbouring crown.
+            if value > parent_height and not math.isclose(value, parent_height, rel_tol=1e-9):
+                # Rising again: we have crossed into a neighbouring crown.  The
+                # allowance is relative because a canopy has no privileged
+                # unit: a fixed 1e-9 m swallowed a rise of 5e-10 m and then
+                # rejected the same forest measured in decimetres, so the crown
+                # gained or lost a cell according to the scale of the numbers.
                 continue
             reach = (nrow - apex.row) ** 2 + (ncol - apex.col) ** 2
             if math.sqrt(reach) * chm.cellsize > limit:
@@ -447,6 +471,9 @@ def detect_trees(chm: Grid, config: DetectionConfig | None = None) -> DetectionR
     """Run the full detection pipeline: smooth, find maxima, delineate crowns."""
     config = config or DetectionConfig()
     smoothed = chm.smooth_mean(config.smooth_radius) if config.smooth_radius else chm.copy()
-    tops = find_treetops(smoothed, config)
+    # Ties are settled against the raster as measured.  Smoothing is allowed to
+    # make two candidates equal — that is what it is for — but it must not also
+    # be the thing that decides which of them wins.
+    tops = find_treetops(smoothed, config, reference=chm)
     crowns, label_grid = segment_crowns(smoothed, tops, config)
     return DetectionResult(crowns=crowns, config=config, label_grid=label_grid, smoothed=smoothed)

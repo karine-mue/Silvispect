@@ -245,6 +245,19 @@ def moved(grid, name):
     return turned, follow
 
 
+def _self_symmetric(grid):
+    """True when some symmetry other than the identity leaves the raster alone.
+
+    Such a raster has two cells that no property of the plot can tell apart:
+    ``5 5 5 5`` is its own mirror image, and a transpose-symmetric plot has a
+    pair of corners that swap.  Whichever of them is chosen, the mirror of that
+    choice is the other one, so an apex — and the crown grown from it — cannot
+    be equivariant however the tie is broken.  The count and the crown sizes
+    still are, and those are what is asserted for these rasters.
+    """
+    return any(moved(grid, name)[0].values == grid.values for name in SYMMETRIES)
+
+
 def test_a_mirrored_raster_is_not_a_different_forest():
     """The reported case: one raster, its mirror image, and different answers.
 
@@ -369,3 +382,92 @@ def test_a_plateau_apex_sits_in_the_middle_of_the_plateau():
             rows[row][col] = 15.0
     tops = find_treetops(Grid.from_rows(rows, cellsize=1.0))
     assert [(top.row, top.col) for top in tops] == [(3, 3)]
+
+
+def test_smoothing_may_make_two_maxima_equal_but_not_choose_between_them():
+    """The reported case: the mean filter erases the only asymmetry there was.
+
+    ``2 3 / 4 9 / 3 2`` is not its own mirror image, but its smoothed surface
+    is — the two maxima it leaves are indistinguishable in every respect.
+    Detection was reading its tie-break off that surface, so the flipped plot
+    produced the *same* crown rather than the flipped one, and the exported
+    positions did not travel with the raster.  Ties are read from the raster as
+    measured, which still tells the two apart.
+    """
+    rows = [[2.0, 3.0], [4.0, 9.0], [3.0, 2.0]]
+    grid = Grid.from_rows(rows, cellsize=0.5)
+    turned, follow = moved(grid, "flipud")
+
+    # The premise: smoothing really does destroy the difference.
+    assert grid.smooth_mean(1).values == turned.smooth_mean(1).values
+
+    original = detect_trees(grid)
+    after = detect_trees(turned)
+    assert len(original.crowns) == len(after.crowns) == 1
+    assert sorted(map(follow, original.crowns[0].cells)) == sorted(after.crowns[0].cells)
+    assert follow((original.crowns[0].apex.row, original.crowns[0].apex.col)) == (
+        after.crowns[0].apex.row,
+        after.crowns[0].apex.col,
+    )
+
+
+@pytest.mark.parametrize("name", sorted(SYMMETRIES))
+def test_smoothed_detection_follows_the_raster_through_every_symmetry(name):
+    """The default pipeline smooths, so the property has to hold through it."""
+    rng = random.Random(20240608)
+    levels = (8.0, 7.0, 4.0, 3.0, 20.0)
+    for _ in range(150):
+        nrows, ncols = rng.randint(2, 5), rng.randint(2, 5)
+        rows = [[rng.choice(levels) for _ in range(ncols)] for _ in range(nrows)]
+        grid = Grid.from_rows(rows, cellsize=1.0)
+        turned, follow = moved(grid, name)
+        original = detect_trees(grid)
+        after = detect_trees(turned)
+        assert len(after.crowns) == len(original.crowns), (rows, name)
+        assert sorted(len(c.cells) for c in after.crowns) == sorted(
+            len(c.cells) for c in original.crowns
+        ), (rows, name)
+        if not _self_symmetric(grid):
+            assert sorted(
+                tuple(sorted(map(follow, crown.cells))) for crown in original.crowns
+            ) == sorted(tuple(sorted(crown.cells)) for crown in after.crowns), (rows, name)
+
+
+def test_a_whole_valued_count_is_stored_as_a_whole_number():
+    """``smooth_radius=1.0`` is one cell, so it has to behave as one.
+
+    Validation accepted it as a whole number and then handed the float to
+    ``range``, which raised a TypeError from inside detection — the value was
+    neither refused nor usable.
+    """
+    config = DetectionConfig(smooth_radius=1.0, min_crown_cells=3.0)
+    assert config.smooth_radius == 1 and isinstance(config.smooth_radius, int)
+    assert config.min_crown_cells == 3 and isinstance(config.min_crown_cells, int)
+    assert detect_trees(Grid.from_rows([[3.0]], cellsize=1.0), config).crowns == []
+
+    with pytest.raises(GridError, match="whole number"):
+        DetectionConfig(smooth_radius=1.5)
+
+
+@pytest.mark.parametrize("scale", [1.0, 10.0, 1000.0, 0.001])
+def test_crown_membership_does_not_depend_on_the_vertical_unit(scale):
+    """Measuring the same forest in decimetres must find the same crowns.
+
+    The allowance for a cell that rises by a hair on the way down from an apex
+    was a fixed 1e-9 m.  That is generous at one scale and nothing at another,
+    so multiplying every height by ten — which cannot change which cell is
+    above which — moved a four-cell crown to three.
+    """
+    config = DetectionConfig(
+        smooth_radius=0,
+        min_height=0.0,
+        min_crown_cells=1,
+        window_intercept=10.0,
+        window_slope=0.0,
+        crown_intercept=10.0,
+        crown_slope=0.0,
+        drop_fraction=0.0,
+    )
+    rows = [[3.0 * scale, 2.0 * scale, 1.0 * scale, scale * (1.0 + 5e-10)]]
+    crowns = detect_trees(Grid.from_rows(rows, cellsize=1.0), config).crowns
+    assert [len(crown.cells) for crown in crowns] == [4]

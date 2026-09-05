@@ -158,20 +158,28 @@ class FittedModel:
     def invert(self, height_m: float, *, lower: float = 0.1, upper: float = 400.0) -> float | None:
         """Back out the diameter implied by a height, or ``None`` if outside range.
 
-        The supported families are monotonically increasing in diameter, so a
-        bisection is both sufficient and robust.
+        The supported families are monotone in diameter, so a bisection is both
+        sufficient and robust.  Monotone, not necessarily *increasing*: least
+        squares is free to return a decreasing curve when the data is
+        decreasing, and it does — six stems whose height halves as the diameter
+        doubles fit a power model at ``b = -1``.  Assuming the increasing
+        direction turned every such inversion into ``None``, so a curve the
+        fitter had just returned could not be read backwards at all.  Which way
+        the curve runs is read off its own endpoints instead.
         """
         try:
             low_value = self.predict(lower)
             high_value = self.predict(upper)
         except ValueError:  # pragma: no cover - guarded by fit validation
             return None
-        if height_m <= low_value or height_m >= high_value:
+        rising = high_value >= low_value
+        floor, ceiling = (low_value, high_value) if rising else (high_value, low_value)
+        if height_m <= floor or height_m >= ceiling:
             return None
         low, high = lower, upper
         for _ in range(200):
             mid = (low + high) / 2.0
-            if self.predict(mid) < height_m:
+            if (self.predict(mid) < height_m) is rising:
                 low = mid
             else:
                 high = mid

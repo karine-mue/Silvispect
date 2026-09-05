@@ -19,7 +19,7 @@ a correction to behaviour that was wrong. Two of them are visible in output —
 decimals, and gains an optional `--precision` to round on request — but neither
 is a new capability. The rounding was the defect.
 
-Seven rounds of review after the release found these. As before, each fix
+Eight rounds of review after the release found these. As before, each fix
 carries a test that fails against the code as it stood — and where the defect
 violated a general property, that property is what the test asserts, over
 randomized inputs rather than the one raster that exposed it.
@@ -217,6 +217,75 @@ itself:
 - A finding could print the two numbers it compared as one — "200 stems/ha is
   below the minimum of 200 stems/ha". Precision is added only for the pairs
   that would otherwise round together, so ordinary findings read as before.
+
+Eighth round — a review of the seventh found twelve more defects, three of
+them serious, two of them introduced by the seventh round itself:
+
+- **An unobserved raster still spoke about a field inventory.** The seventh
+  round stopped the stocking and canopy *rules* from reading an all-nodata
+  raster as an empty forest, but detection still ran on it and its empty
+  result was still matched against the inventory — so every field stem came
+  back as missed by a sensor that had never seen anything, SV050 fired at
+  "0 of 1", and a `--fail-on warning` run failed over a plot nobody had looked
+  at. The serialized report agreed: cover, open fraction, rugosity, strata and
+  the gap count were all numeric zeros. Detection, gap mapping, matching and
+  the canopy summary now do not run at all without a valid cell, and their
+  blocks are absent rather than zero.
+- **A valid configuration could hide a critical finding.** `min_gap_area` is
+  the reporting floor and `max_gap_area` the limit SV011 enforces, and nothing
+  stopped the floor being set above the limit: at 101 m² against 50 m² a
+  100 m² opening was deleted before the rule saw it and the inspection came
+  back clean. The pair is now validated like the stocking and density pairs
+  beside it.
+- **Detection was still not reflection-equivariant, in a way the count could
+  not see.** The mean filter turns `2 3 / 4 9 / 3 2` into a surface that is its
+  own mirror image, and the tie-break was reading that surface — so the two
+  maxima it leaves were indistinguishable and the mirrored plot returned the
+  *same* crown rather than the mirrored one. Ties are now settled against the
+  raster as measured, which still tells the two apart: smoothing is allowed to
+  make two candidates equal, but not to be the thing that decides between
+  them. Over 8,085 comparisons across the eight symmetries of rasters with no
+  symmetry of their own, crown cells and apexes now transform exactly.
+- **The seventh round's Lorey-height repair overflowed.** Normalising the
+  weights alone leaves two equal weights at 1 and 1, and the heights then
+  reach the finite limit in the sum instead: two stems of the largest finite
+  height have exactly that height as their weighted mean, and asking for it
+  raised. Both sides are normalised now.
+- **`chm` could write a raster its own reader refuses.** A surface at the
+  largest finite float over a terrain at its negative has a height no float
+  can hold; the subtraction returned infinity, the file was written with `inf`
+  in it, the command reported success, and the model would not parse. The
+  subtraction is checked before anything is written.
+- **Gap width was measured centre to centre, not as a circle inside the gap.**
+  Half of the step from an open cell to the canopy cell beside it lies inside
+  that tree, so it is not clearance: a one-metre square opening reported a
+  two-metre width and survived a 1.5 m minimum it should have failed. The
+  distance field now measures to the canopy boundary, as it already did to the
+  plot edge. **Reported widths drop by one cell** and `min_gap_width` now
+  demands the clearance it names — on the sample plot the three gaps go from
+  12.3/5.8/5.8 m to 11.8/5.3/5.3 m, and their areas shrink with them.
+- **Decimal class boundaries still misclassified stems.** Binary floats put
+  0.3 / 0.1 a hair below three, so a stem sitting exactly on a class boundary
+  fell into the band below and took a label like `0.2-0.30000000000000004`
+  with it. Band numbers and boundaries are worked out in decimal, which is how
+  the widths and the diameters were written.
+- **A curve the fitter returns could not be read backwards.** Least squares
+  will return a decreasing power model for decreasing data, and inversion
+  assumed the curve rose — so every inversion of a height that curve actually
+  attains came back as `null`. Which way the curve runs is read off its own
+  endpoints now.
+- A whole-valued float count — `smooth_radius=1.0` — passed validation as a
+  whole number of cells and then raised a `TypeError` from inside detection.
+  It is stored as the integer it is.
+- Crown membership depended on the vertical unit: the allowance for a cell
+  that rises by a hair on the way down from an apex was a fixed 1e-9 m, so
+  measuring the same forest in decimetres moved a four-cell crown to three. It
+  is relative now.
+- Above-ground biomass overflowed on diameters the inventory accepts, because
+  `(rho D² H)^0.976` squared the diameter before applying the exponent that
+  brings the result back into range. The exponent is distributed.
+- `docs/concepts.md` still described the plateau apex as "the first in
+  row-major order", which the seventh round replaced.
 
 Default inventory CSV serialisation was examined and **left unchanged**. It
 rounds to three decimals, so a stem four ten-thousandths outside a match

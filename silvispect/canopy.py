@@ -48,8 +48,26 @@ def canopy_height_model(dsm: Grid, dtm: Grid, *, floor: float = 0.0) -> Grid:
     Negative heights are a normalisation artefact rather than a physical
     quantity, so they are clamped instead of being discarded: a cell that
     measures slightly below ground is still a measured, treeless cell.
+
+    Raises:
+        GridError: If a cell's height is not representable.  A surface at the
+            largest finite float over a terrain at its negative has a height
+            that no float can hold; the subtraction returned infinity, the
+            writer put ``inf`` in the file, and the reader — which forbids
+            non-finite cells — then refused the model the command had just
+            said it had written.  The refusal belongs here, before anything is
+            written.
     """
-    chm = dsm.combine(dtm, lambda surface, terrain: surface - terrain)
+
+    def height(surface: float, terrain: float) -> float:
+        value = surface - terrain
+        if not math.isfinite(value):
+            raise GridError(
+                f"canopy height {surface!r} - {terrain!r} is not a representable number"
+            )
+        return value
+
+    chm = dsm.combine(dtm, height)
     return chm.clip(minimum=floor)
 
 
@@ -169,11 +187,21 @@ def _canopy_distance_field(chm: Grid, threshold: float) -> list[float]:
     Taking the minimum against the edge distance also covers a raster with no
     canopy at all, where the chamfer search alone would leave every cell at
     infinity — and JSON has no way to write that down.
+
+    **Distances are to the boundary, not to the cell centre beyond it.**  The
+    chamfer walks centre to centre, so an opening one cell across measured a
+    full cell of clearance and reported a two-metre width on a one-metre
+    square — twice the diameter of any circle that fits in it, and enough to
+    survive a minimum-width filter it should have failed.  Half a cell of that
+    step lies inside the canopy cell itself, so it is taken off; the edge
+    distance was already measured to the extent rather than to a cell centre,
+    which is what made the two halves of the minimum disagree.
     """
     seeds = [
         position for position, value in enumerate(chm.values) if value is None or value >= threshold
     ]
-    to_canopy = _chamfer(chm, seeds)
+    half = chm.cellsize / 2.0
+    to_canopy = [max(0.0, distance - half) for distance in _chamfer(chm, seeds)]
     to_outside = _distance_to_outside(chm)
     return [min(canopy, outside) for canopy, outside in zip(to_canopy, to_outside, strict=True)]
 

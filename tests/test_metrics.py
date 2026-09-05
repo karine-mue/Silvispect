@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import sys
+from decimal import Decimal
 
 import pytest
 
@@ -282,3 +284,84 @@ def test_lorey_height_still_ignores_row_order_after_scaling():
         *(Tree(tree_id=str(i), x=float(i), y=0.0, dbh_cm=10.0, height_m=1.0) for i in range(20)),
     ]
     assert lorey_height(trees) == lorey_height(list(reversed(trees)))
+
+
+def test_lorey_height_survives_heights_as_large_as_diameters():
+    """Normalising one side of a weighted mean is not enough.
+
+    Two equal weights become 1 and 1, and the heights then reach the finite
+    limit in the sum instead: two stems of the largest finite height have
+    exactly that height as their weighted mean, and asking for it raised.
+    """
+    peak = sys.float_info.max
+    equal = [
+        Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=1.0, height_m=peak),
+        Tree(tree_id="b", x=1.0, y=0.0, dbh_cm=1.0, height_m=peak),
+    ]
+    assert lorey_height(equal) == peak
+
+    mixed = [
+        Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=1e150, height_m=peak / 2),
+        Tree(tree_id="b", x=1.0, y=0.0, dbh_cm=1e-3, height_m=1.0),
+    ]
+    assert math.isfinite(lorey_height(mixed))
+
+    # Ordinary stands are unaffected.
+    plain = [
+        Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=20.0, height_m=15.0),
+        Tree(tree_id="b", x=1.0, y=0.0, dbh_cm=40.0, height_m=25.0),
+    ]
+    assert lorey_height(plain) == pytest.approx(23.0, abs=0.01)
+
+
+def test_biomass_does_not_overflow_on_a_diameter_it_accepts():
+    """``(rho D^2 H)^0.976`` must not be computed by squaring first.
+
+    The square reaches the finite limit above about 1.3e154 cm even when the
+    answer, once the exponent is applied, is an ordinary finite number.
+    """
+    value = above_ground_biomass(Tree(tree_id="x", x=0.0, y=0.0, dbh_cm=1e155, height_m=1.0))
+    assert math.isfinite(value)
+    assert value == pytest.approx(1.2422522398e301, rel=1e-9)
+
+    # The distributed form is the same equation, so ordinary stems are unmoved.
+    ordinary = Tree(tree_id="t", x=0.0, y=0.0, dbh_cm=30.0, height_m=20.0, species="FASY")
+    rho = 0.58
+    assert above_ground_biomass(ordinary) == pytest.approx(
+        0.0673 * (rho * 30.0**2 * 20.0) ** 0.976, rel=1e-12
+    )
+
+
+@pytest.mark.parametrize("class_width", [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
+def test_every_stem_lands_in_the_class_that_contains_it(class_width):
+    """Checked against an independent decimal interval oracle.
+
+    Binary floats put ``0.3 / 0.1`` a hair below three, so a stem sitting
+    exactly on a class boundary fell into the band below and dragged a label
+    like ``0.2-0.30000000000000004`` with it.  The oracle here reads the
+    printed bounds back and asserts ``lower <= dbh < upper`` in decimal, which
+    is the claim the label makes.
+    """
+    diameters = [0.1, 0.3, 0.5, 1.0, 2.5, 5.0, 7.5, 12.3, 30.0, 44.0]
+    trees = [
+        Tree(tree_id=str(index), x=0.0, y=0.0, dbh_cm=dbh) for index, dbh in enumerate(diameters)
+    ]
+    classes = diameter_distribution(trees, class_width=class_width)
+    assert sum(classes.values()) == len(diameters)
+
+    placed = 0
+    for label, count in classes.items():
+        low_text, high_text = label.split("-")
+        low, high = Decimal(low_text), Decimal(high_text)
+        assert high - low == Decimal(repr(class_width))
+        inside = [d for d in diameters if low <= Decimal(repr(d)) < high]
+        assert len(inside) == count, (label, inside)
+        placed += count
+    assert placed == len(diameters)
+
+
+def test_a_stem_on_a_class_boundary_starts_the_upper_class():
+    """The reported case, and the label it used to carry."""
+    stem = [Tree(tree_id="t", x=0.0, y=0.0, dbh_cm=0.3)]
+    assert diameter_distribution(stem, class_width=0.1) == {"0.3-0.4": 1}
+    assert diameter_distribution(stem, class_width=0.3) == {"0.3-0.6": 1}

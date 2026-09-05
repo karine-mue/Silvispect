@@ -163,6 +163,11 @@ class InspectionConfig:
         for low, high in (
             ("min_stems_per_ha", "max_stems_per_ha"),
             ("min_sdi", "max_sdi"),
+            # A reporting floor above the limit it feeds hides exactly the
+            # findings it exists to surface: a min_gap_area of 101 m2 with a
+            # max_gap_area of 50 m2 deleted a 100 m2 opening before SV011 could
+            # call it critical, and the run came back clean.
+            ("min_gap_area", "max_gap_area"),
         ):
             if getattr(self, low) > getattr(self, high):
                 raise ValueError(f"{low} must not exceed {high}")
@@ -796,9 +801,18 @@ def inspect_stand(
     if area_ha is None or area_ha <= 0:
         raise ValueError("area_ha must be supplied and positive when no raster is given")
 
+    # A raster with no valid cell has measured nothing.  Detection, gap mapping
+    # and the canopy summary all describe observations, so with none to
+    # describe they are absent rather than zero.  Running them anyway reported
+    # a cover of 0 %, a gap fraction of 0 and — worst of the three — matched a
+    # field inventory against an empty detection, so every stem came back as
+    # missed by a sensor that had never seen anything, and SV050 failed a
+    # ``--fail-on warning`` run over a raster nobody had looked at.
+    observed = chm is not None and chm.has_observations
+
     detection: DetectionResult | None = None
     gaps: list[CanopyGap] = []
-    if chm is not None:
+    if chm is not None and observed:
         if run_detection:
             detection = detect_trees(chm, detection_config or DetectionConfig())
         gaps = find_gaps(
@@ -823,7 +837,6 @@ def inspect_stand(
     elif detection is not None:
         model = default_model("")
 
-    observed = chm is not None and chm.has_observations
     if field_trees is not None:
         analysis_trees = field_trees
         source = "field"
@@ -868,7 +881,7 @@ def inspect_stand(
     findings.sort(key=lambda f: (-int(f.severity), f.code, f.subject))
 
     canopy_summary: dict[str, object] = {}
-    if chm is not None:
+    if chm is not None and observed:
         stats = chm.stats()
         canopy_summary = {
             "cover": round(canopy_cover(chm, config.canopy_threshold), 4),

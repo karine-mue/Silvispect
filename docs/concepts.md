@@ -44,7 +44,7 @@ artefact of resolution:
 ```console
 $ silvispect gaps data/plot-a1-chm.asc --min-width 0
 3 gaps at or above 25 m2 and 0.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        511 m2  width  12.3 m  ...   <- one opening fused to the web
+  gap 1        511 m2  width  11.8 m  ...   <- one opening fused to the web
 ```
 
 Silvispect applies the **Brokaw criterion**: a gap must be wide enough to
@@ -56,7 +56,7 @@ components" filter cannot do. Labelling then runs on the opened mask:
 ```console
 $ silvispect gaps data/plot-a1-chm.asc
 3 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        170 m2  width  12.3 m  ...   <- the opening alone
+  gap 1        161 m2  width  11.8 m  ...   <- the opening alone
 ```
 
 Both report the *same* inscribed width: the difference is entirely tentacles of
@@ -117,8 +117,15 @@ with the same connectivity. Using eight-connectivity there regardless let a
 diagonal contact carry the edge flag into an opening that four-connectivity had
 deliberately kept separate.
 
+Distances are measured to the canopy's **boundary**, not to the centre of the
+cell beyond it. Half of the step from an open cell's centre to a canopy cell's
+centre lies inside the canopy, so it is not clearance: counting it let a
+one-metre square opening claim a two-metre inscribed circle and survive a
+`min_width` of 1.5 m that it should have failed.
+
 Two consequences of "as mapped" are worth stating plainly. The **plot edge is a
-boundary** for the inscribed circle: nothing is known beyond the extent, so a
+boundary** for the inscribed circle too, measured the same way — half a cell
+out from the outermost centre: nothing is known beyond the extent, so a
 gap running off the side is measured only within it. Without that bound a
 10 m x 10 m plot with a single corner tree reported a 25 m gap width — larger
 than the raster's own diagonal. And because the opening insets the mask
@@ -147,9 +154,31 @@ radius is therefore a linear function of the height of the cell being tested:
 r(h) = window_intercept + window_slope · h        [metres]
 ```
 
-with defaults `0.8 + 0.055·h`. A cell is a treetop if no cell within `r(h)` is
-taller. Plateaus of exactly equal height resolve to a single apex — the first
-in row-major order — so results are deterministic.
+with defaults `0.8 + 0.055·h`. A cell is a treetop if a **strictly** taller
+cell lies within `r(h)`; equal cells never suppress one another, because which
+of two equal maxima is scanned first is a fact about the array and not about
+the forest — it reverses when the plot is mirrored.
+
+A connected run of exactly equal height is one treetop, not one per cell. Its
+apex is the member nearest the run's centre, measured in whole cells so that
+the answer mirrors exactly; where several are equally central, the one whose
+surroundings are denser wins, judged by the sorted list of (distance, height)
+pairs seen from each — a quantity every rotation and reflection of a raster
+preserves. Only members that even that cannot tell apart fall back on row and
+column order.
+
+The same ordering settles which crown claims a cell two equally tall apexes
+both reach. **Ties are read from the raster as measured, not from the smoothed
+surface**: the mean filter can make two candidates equal — that is what it is
+for — but it must not also be what decides between them. On `2 3 / 4 9 / 3 2`
+smoothing produces a surface that is its own mirror image, and nothing in it
+distinguishes the two maxima that the raster distinguishes easily.
+
+Detection is therefore equivariant: rotating or reflecting a plot rotates or
+reflects the trees found in it. The exception is a plot that really is
+symmetric — a flat run with no middle cell has no apex that mirrors onto
+itself — where the count and the crown sizes are fixed but the choice between
+two interchangeable cells cannot be.
 
 The CHM is mean-filtered first (radius 1 cell by default). This suppresses the
 single-cell spikes that would otherwise each become a tree, at the cost of a

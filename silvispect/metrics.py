@@ -12,6 +12,7 @@ import math
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from .grid import mean_of, rms_of, sum_of
 from .inventory import Tree
@@ -90,14 +91,19 @@ def lorey_height(trees: Sequence[Tree]) -> float | None:
         heights.append(tree.height_m)
     if not weights:
         return None
-    # Weights are carried in units of the largest of them, so neither the
-    # total nor any single ``area * height`` product can leave the finite
-    # range on stems that were individually acceptable; the scale is common to
-    # numerator and denominator and cancels out of the ratio.
-    scale = max(weights)
-    if scale == 0.0:
+    # Both sides are carried in units of the largest value present, so no
+    # single ``area * height`` product and no running total can leave the
+    # finite range on stems that were individually acceptable.  Normalising the
+    # weights alone is not enough: two equal weights become 1 and 1, and the
+    # heights then reach the limit in the sum instead — two stems of the
+    # largest finite height have that height as their exact weighted mean, and
+    # asking for it raised.  Both scales cancel, one from each side of the
+    # ratio and one multiplied back in at the end.
+    weight_scale = max(weights)
+    height_scale = max(heights)
+    if weight_scale == 0.0 or height_scale == 0.0:
         return None
-    shares = [weight / scale for weight in weights]
+    shares = [weight / weight_scale for weight in weights]
     weight_sum = math.fsum(shares)
     if weight_sum == 0:
         return None
@@ -105,9 +111,10 @@ def lorey_height(trees: Sequence[Tree]) -> float | None:
     # Running totals lose the small stems once a large one has been added, and
     # the loss depends on when it arrived: reversing a list of one 1e16 m stem
     # among twenty 1 m stems moved the result by a whole metre.
-    return math.fsum(share * height for share, height in zip(shares, heights, strict=True)) / (
-        weight_sum
+    weighted = math.fsum(
+        share * (height / height_scale) for share, height in zip(shares, heights, strict=True)
     )
+    return height_scale * (weighted / weight_sum)
 
 
 def dominant_height(trees: Sequence[Tree], area_ha: float) -> float | None:
@@ -201,12 +208,21 @@ def simpson_index(trees: Sequence[Tree]) -> float | None:
     return 1.0 - sum(p * p for p in shares.values())
 
 
-def _class_bound(value: float) -> str:
-    """Render a class boundary without inventing or dropping precision."""
-    if value == int(value):
-        return str(int(value))
-    text = f"{value:.10f}".rstrip("0").rstrip(".")
-    return text if text and float(text) == value else repr(value)
+def _class_bound(value: Decimal) -> str:
+    """Render a class boundary as the decimal it is, without a trailing zero."""
+    text = format(value.normalize(), "f")
+    return text if text else "0"
+
+
+def _as_decimal(value: float) -> Decimal:
+    """Read a float as the decimal a person would have written for it.
+
+    ``Decimal(0.1)`` is the binary value, which is a shade above a tenth;
+    ``Decimal("0.1")`` is a tenth.  Class widths and diameters are written by
+    people in decimal, and ``repr`` gives back the shortest text that reads as
+    the same float — so going through it recovers what was meant.
+    """
+    return Decimal(repr(value))
 
 
 def diameter_distribution(trees: Sequence[Tree], *, class_width: float = 5.0) -> dict[str, int]:
@@ -218,16 +234,22 @@ def diameter_distribution(trees: Sequence[Tree], *, class_width: float = 5.0) ->
     0.5 cm, 0.2 cm and 0.7 cm were counted together in a class labelled
     ``0-0`` — so the width is kept as given and the boundaries are computed
     from the band number.
+
+    The band number is worked out in decimal.  Binary floats put 0.3 / 0.1 a
+    hair below 3, so a stem sitting exactly on a class boundary fell into the
+    band below it and took a label like ``0.2-0.30000000000000004`` with it.
+    Widths and diameters are written in decimal by the people who measure
+    them, and dividing them as decimals puts the stem where they meant it.
     """
     if class_width <= 0:
         raise MetricsError("class_width must be positive")
+    width = _as_decimal(class_width)
     counts: Counter[int] = Counter()
     for tree in _measured(trees):
-        counts[math.floor(tree.dbh_cm / class_width)] += 1  # type: ignore[operator]
+        assert tree.dbh_cm is not None
+        counts[int(_as_decimal(tree.dbh_cm) // width)] += 1
     return {
-        f"{_class_bound(index * class_width)}-{_class_bound((index + 1) * class_width)}": counts[
-            index
-        ]
+        f"{_class_bound(index * width)}-{_class_bound((index + 1) * width)}": counts[index]
         for index in sorted(counts)
     }
 
@@ -252,7 +274,12 @@ def above_ground_biomass(tree: Tree, *, wood_density: float | None = None) -> fl
         return None
     if wood_density is None:
         wood_density = WOOD_DENSITY.get(tree.species.strip().upper(), DEFAULT_WOOD_DENSITY)
-    return 0.0673 * (wood_density * tree.dbh_cm**2 * tree.height_m) ** 0.976
+    # Distributing the exponent keeps the diameter term out of the square.
+    # ``(rho * D^2 * H)^0.976`` is ``(rho * H)^0.976 * D^1.952``, and the two
+    # differ only in what overflows: squaring first reaches the finite limit
+    # above about 1.3e154 cm, for a biomass whose value is an ordinary finite
+    # number the second form returns without difficulty.
+    return 0.0673 * (wood_density * tree.height_m) ** 0.976 * tree.dbh_cm**1.952
 
 
 @dataclass(frozen=True)

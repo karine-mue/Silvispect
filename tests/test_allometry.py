@@ -219,3 +219,33 @@ def test_fit_is_independent_of_record_order():
             shuffled = pairs[:]
             rng.shuffle(shuffled)
             assert fit_height_diameter(shuffled, model=family).as_dict() == baseline
+
+
+def test_a_curve_the_fitter_returns_can_be_read_backwards():
+    """Least squares can return a decreasing curve, and inversion must cope.
+
+    Six stems whose height halves as the diameter doubles fit a power model at
+    ``b = -1``.  Bisection assumed the curve rose, so every inversion of a
+    height the curve actually attains came back as ``None`` — a model the
+    fitter had just produced could not be used in the direction the API
+    documents.
+    """
+    pairs = [(1.0, 100.0), (2.0, 50.0), (4.0, 25.0), (8.0, 12.5), (16.0, 6.25), (32.0, 3.125)]
+    model = fit_height_diameter(pairs, model="power")
+    assert model.params[1] < 0  # the fitted curve really does fall
+
+    for dbh, height in pairs[1:-1]:
+        assert model.invert(height) == pytest.approx(dbh, rel=1e-5)
+
+    # Heights outside the curve's own range are still unanswerable.
+    assert model.invert(model.predict(0.1) * 2) is None
+    assert model.invert(model.predict(400.0) / 2) is None
+
+
+def test_inverting_a_rising_curve_is_unchanged():
+    """The ordinary direction keeps working exactly as before."""
+    pairs = [(5.0, 4.0), (10.0, 8.0), (15.0, 12.0), (20.0, 15.0), (25.0, 17.0), (30.0, 19.0)]
+    model = fit_height_diameter(pairs, model="naslund")
+    for dbh in (8.0, 16.0, 24.0):
+        assert model.invert(model.predict(dbh)) == pytest.approx(dbh, rel=1e-4)
+    assert model.invert(500.0) is None

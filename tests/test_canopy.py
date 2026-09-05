@@ -129,12 +129,20 @@ def test_synthetic_stand_has_realistic_cover(stand):
 
 
 def test_distance_to_canopy_measures_to_the_nearest_tree():
+    """The distance is to the canopy's edge, as the edge of the plot already was.
+
+    Half of the step from an open cell's centre to a canopy cell's centre lies
+    inside the canopy cell, so it is not clearance.  Counting it made the two
+    halves of this field disagree — the plot edge below is measured to the
+    extent, half a cell from the outermost centre — and a one-metre opening
+    claimed a two-metre inscribed circle.
+    """
     chm = Grid.filled(7, 7, 0.0, cellsize=1.0)
     chm.set(3, 3, 10.0)
     distances = distance_to_canopy(chm, threshold=2.0)
     assert distances.get(3, 3) == 0.0
-    assert distances.get(3, 4) == pytest.approx(1.0)
-    assert distances.get(2, 2) == pytest.approx(math.sqrt(2.0))
+    assert distances.get(3, 4) == pytest.approx(0.5)
+    assert distances.get(2, 2) == pytest.approx(math.sqrt(2.0) - 0.5)
 
 
 def test_distance_to_canopy_is_bounded_by_the_plot_edge():
@@ -524,3 +532,60 @@ def test_gap_geometry_stays_finite_for_a_raster_it_accepts():
         assert math.isfinite(gap.centroid_x)
         assert math.isfinite(gap.centroid_y)
         assert math.isfinite(gap.mean_height)
+
+
+def test_gap_width_is_the_circle_that_fits_inside_the_opening():
+    """One open cell on a one-metre raster is one metre wide, not two.
+
+    The distance field walked centre to centre, so the open cell counted a
+    whole cell of clearance when half of that step lies inside the tree beside
+    it.  The opening then survived a ``min_width`` of 1.5 m that no circle
+    inside it could have met.
+    """
+    plot = Grid.from_rows([[9.0, 9.0, 9.0], [9.0, 0.0, 9.0], [9.0, 9.0, 9.0]], cellsize=1.0)
+    unfiltered = find_gaps(plot, threshold=2.0, min_area=0.0, min_width=0.0)
+    assert [gap.width for gap in unfiltered] == [1.0]
+    assert find_gaps(plot, threshold=2.0, min_area=0.0, min_width=1.5) == []
+    assert len(find_gaps(plot, threshold=2.0, min_area=0.0, min_width=1.0)) == 1
+
+
+@pytest.mark.parametrize("cellsize", [0.25, 1.0, 4.0])
+def test_a_square_opening_reports_the_side_it_actually_has(cellsize):
+    """A k-by-k open square has an inscribed circle of diameter k cells."""
+    for span in (1, 3, 5):
+        size = span + 4
+        rows = [[9.0] * size for _ in range(size)]
+        edge = (size - span) // 2
+        for row in range(edge, edge + span):
+            for col in range(edge, edge + span):
+                rows[row][col] = 0.0
+        gaps = find_gaps(
+            Grid.from_rows(rows, cellsize=cellsize),
+            threshold=2.0,
+            min_area=0.0,
+            min_width=0.0,
+        )
+        assert len(gaps) == 1
+        assert gaps[0].width == pytest.approx(span * cellsize)
+
+
+def test_a_canopy_height_that_cannot_be_written_is_refused_before_writing():
+    """The reader forbids non-finite cells, so the writer must not produce one.
+
+    A surface at the largest finite float over a terrain at its negative has a
+    height no float can hold.  The subtraction returned infinity, the file was
+    written with ``inf`` in it, the command reported success, and the model it
+    had just written would not parse.
+    """
+    import sys
+
+    peak = sys.float_info.max
+    with pytest.raises(GridError, match="not a representable number"):
+        canopy_height_model(Grid.from_rows([[peak]]), Grid.from_rows([[-peak]]))
+
+    # Whatever the model does produce reads back as itself.
+    derived = canopy_height_model(
+        Grid.from_rows([[20.0, 5.0], [1e200, -1e200]]),
+        Grid.from_rows([[1.0, 6.0], [1.0, 1.0]]),
+    )
+    assert Grid.parse(derived.to_text(precision=None)).values == derived.values
