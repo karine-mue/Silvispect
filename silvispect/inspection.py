@@ -23,9 +23,9 @@ from .allometry import (
     fit_by_species,
     residual_scores,
 )
-from .canopy import CanopyGap, canopy_cover, find_gaps, rugosity, vertical_strata
+from .canopy import CanopyGap, canopy_cover, find_gaps, gap_fraction, rugosity, vertical_strata
 from .detect import Crown, DetectionConfig, DetectionResult, detect_trees
-from .grid import Grid
+from .grid import Grid, mean_of, stdev_of
 from .inventory import MatchResult, Tree, match_trees, trees_from_crowns
 from .metrics import StandMetrics, stand_metrics
 
@@ -134,9 +134,15 @@ class InspectionConfig:
         A profile is user input, so it is validated at the boundary rather than
         being allowed to surface later as a traceback from deep inside a fit.
         """
-        if isinstance(self.min_allometry_points, bool) or (
-            self.min_allometry_points != int(self.min_allometry_points)
-        ):
+        # The same semantic domain whichever door the value came through.
+        # ``from_dict`` refused booleans and non-numbers; direct construction
+        # did not, so ``InspectionConfig(min_canopy_cover=True)`` built a
+        # profile whose cover threshold was the boolean ``True`` and reported
+        # it back in exactly that form.
+        for name, value in asdict(self).items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be a number, got {type(value).__name__}")
+        if self.min_allometry_points != int(self.min_allometry_points):
             raise ValueError(
                 f"min_allometry_points must be a whole number, got {self.min_allometry_points!r}"
             )
@@ -157,6 +163,11 @@ class InspectionConfig:
         for low, high in (
             ("min_stems_per_ha", "max_stems_per_ha"),
             ("min_sdi", "max_sdi"),
+            # A reporting floor above the limit it feeds hides exactly the
+            # findings it exists to surface: a min_gap_area of 101 m2 with a
+            # max_gap_area of 50 m2 deleted a 100 m2 opening before SV011 could
+            # call it critical, and the run came back clean.
+            ("min_gap_area", "max_gap_area"),
         ):
             if getattr(self, low) > getattr(self, high):
                 raise ValueError(f"{low} must not exceed {high}")
@@ -227,9 +238,24 @@ class InspectionContext:
 
         False when detection was skipped and no inventory was supplied: the
         stand then has *unknown* stocking, not zero stocking, so the stem-based
-        rules must stay quiet instead of reporting an empty forest.
+        rules must stay quiet instead of reporting an empty forest.  Running the
+        detector over a raster with nothing in it is not looking either — see
+        :attr:`has_canopy_observations`.
         """
-        return self.detection is not None or self.field_trees is not None
+        if self.field_trees is not None:
+            return True
+        return self.detection is not None and self.has_canopy_observations
+
+    @property
+    def has_canopy_observations(self) -> bool:
+        """Whether the raster actually measured anything.
+
+        An all-nodata raster is unobserved ground.  Reading it as a measured
+        canopy turns the absence of a survey into a confident finding: a 1x1
+        raster of nodata reported an understocked stand with cover below target,
+        neither of which anybody had looked for.
+        """
+        return self.chm is not None and self.chm.has_observations
 
     @property
     def has_raster(self) -> bool:
@@ -240,6 +266,42 @@ Rule = Callable[[InspectionContext], Iterable[Finding]]
 
 #: Registered rules, in registration order.
 RULES: list[Rule] = []
+
+
+def _compared(
+    value: float,
+    threshold: float,
+    spec: str,
+    threshold_spec: str | None = None,
+    *,
+    limit: int = 12,
+) -> tuple[str, str]:
+    """Render a measurement and the limit it broke without denying the breach.
+
+    A finding says one number is below or above another, and then prints both.
+    Rounding them to the resolution a reader wants can collapse the two onto
+    the same digits, leaving the sentence contradicting itself: a density of
+    200.4 stems/ha against a minimum of 200 read "200 stems/ha is below the
+    minimum of 200 stems/ha".
+
+    Ordinary findings keep the resolution the rule chose — precision is added
+    only for the pairs that would otherwise print alike, and then to both sides
+    so they stay comparable.
+    """
+    threshold_spec = spec if threshold_spec is None else threshold_spec
+    kind = spec[-1]
+    places, threshold_places = int(spec[:-1] or 0), int(threshold_spec[:-1] or 0)
+    common = max(places, threshold_places)
+    if value == threshold or format(value, f".{common}{kind}") != format(
+        threshold, f".{common}{kind}"
+    ):
+        return format(value, f".{places}{kind}"), format(threshold, f".{threshold_places}{kind}")
+    while common < limit:
+        common += 1
+        left, right = format(value, f".{common}{kind}"), format(threshold, f".{common}{kind}")
+        if left != right:
+            return left, right
+    return repr(value), repr(threshold)
 
 
 def rule(fn: Rule) -> Rule:
@@ -261,22 +323,24 @@ def check_stocking(ctx: InspectionContext) -> Iterable[Finding]:
         return
     cfg = ctx.config
     if density < cfg.min_stems_per_ha:
+        shown, limit = _compared(density, cfg.min_stems_per_ha, "0f")
         yield Finding(
             "SV001",
             Severity.WARNING,
             "Understocked stand",
-            f"{density:.0f} stems/ha is below the minimum of "
-            f"{cfg.min_stems_per_ha:.0f} stems/ha ({ctx.metrics_source} data).",
+            f"{shown} stems/ha is below the minimum of "
+            f"{limit} stems/ha ({ctx.metrics_source} data).",
             value=density,
             threshold=cfg.min_stems_per_ha,
         )
     elif density > cfg.max_stems_per_ha:
+        shown, limit = _compared(density, cfg.max_stems_per_ha, "0f")
         yield Finding(
             "SV002",
             Severity.NOTICE,
             "Overstocked stand",
-            f"{density:.0f} stems/ha exceeds the maximum of "
-            f"{cfg.max_stems_per_ha:.0f} stems/ha; competition-driven mortality "
+            f"{shown} stems/ha exceeds the maximum of "
+            f"{limit} stems/ha; competition-driven mortality "
             "is likely.",
             value=density,
             threshold=cfg.max_stems_per_ha,
@@ -293,21 +357,22 @@ def check_density_index(ctx: InspectionContext) -> Iterable[Finding]:
         return
     cfg = ctx.config
     if sdi < cfg.min_sdi:
+        shown, limit = _compared(sdi, cfg.min_sdi, "0f")
         yield Finding(
             "SV003",
             Severity.NOTICE,
             "Low stand density index",
-            f"SDI {sdi:.0f} is below {cfg.min_sdi:.0f}; the site is not fully "
-            "occupying the growing space.",
+            f"SDI {shown} is below {limit}; the site is not fully occupying the growing space.",
             value=sdi,
             threshold=cfg.min_sdi,
         )
     elif sdi > cfg.max_sdi:
+        shown, limit = _compared(sdi, cfg.max_sdi, "0f")
         yield Finding(
             "SV004",
             Severity.WARNING,
             "High stand density index",
-            f"SDI {sdi:.0f} exceeds {cfg.max_sdi:.0f}; the stand is approaching "
+            f"SDI {shown} exceeds {limit}; the stand is approaching "
             "the zone of imminent competition mortality.",
             value=sdi,
             threshold=cfg.max_sdi,
@@ -320,16 +385,17 @@ def check_density_index(ctx: InspectionContext) -> Iterable[Finding]:
 @rule
 def check_canopy_cover(ctx: InspectionContext) -> Iterable[Finding]:
     """SV010 — canopy cover below the silvicultural target."""
-    if ctx.chm is None:
+    if ctx.chm is None or not ctx.has_canopy_observations:
         return
     cover = canopy_cover(ctx.chm, ctx.config.canopy_threshold)
     if cover < ctx.config.min_canopy_cover:
+        shown, limit = _compared(cover, ctx.config.min_canopy_cover, "1%", "0%")
         yield Finding(
             "SV010",
             Severity.WARNING,
             "Canopy cover below target",
-            f"Cover of {cover:.1%} at the {ctx.config.canopy_threshold:.1f} m "
-            f"threshold is under the target of {ctx.config.min_canopy_cover:.0%}.",
+            f"Cover of {shown} at the {ctx.config.canopy_threshold:.1f} m "
+            f"threshold is under the target of {limit}.",
             value=cover,
             threshold=ctx.config.min_canopy_cover,
         )
@@ -359,17 +425,18 @@ def check_large_gaps(ctx: InspectionContext) -> Iterable[Finding]:
 @rule
 def check_gap_fraction(ctx: InspectionContext) -> Iterable[Finding]:
     """SV012 — too much of the plot is open canopy."""
-    if ctx.chm is None:
+    if ctx.chm is None or not ctx.has_canopy_observations:
         return
-    fraction = 1.0 - canopy_cover(ctx.chm, ctx.config.canopy_threshold)
+    fraction = gap_fraction(ctx.chm, threshold=ctx.config.canopy_threshold)
     if fraction > ctx.config.max_gap_fraction:
+        shown, limit = _compared(fraction, ctx.config.max_gap_fraction, "1%", "0%")
         yield Finding(
             "SV012",
             Severity.NOTICE,
             "High open-canopy fraction",
-            f"{fraction:.1%} of the plot is below "
+            f"{shown} of the plot is below "
             f"{ctx.config.canopy_threshold:.1f} m, above the "
-            f"{ctx.config.max_gap_fraction:.0%} limit.",
+            f"{limit} limit.",
             value=fraction,
             threshold=ctx.config.max_gap_fraction,
         )
@@ -387,12 +454,13 @@ def check_structural_diversity(ctx: InspectionContext) -> Iterable[Finding]:
     if gini is None:
         return
     if gini < ctx.config.min_gini:
+        shown, limit = _compared(gini, ctx.config.min_gini, "2f")
         yield Finding(
             "SV020",
             Severity.NOTICE,
             "Low structural diversity",
-            f"Gini coefficient of basal area is {gini:.2f}, below "
-            f"{ctx.config.min_gini:.2f}: the stand is structurally uniform and "
+            f"Gini coefficient of basal area is {shown}, below "
+            f"{limit}: the stand is structurally uniform and "
             "vulnerable to a single disturbance agent.",
             value=gini,
             threshold=ctx.config.min_gini,
@@ -406,11 +474,12 @@ def check_species_diversity(ctx: InspectionContext) -> Iterable[Finding]:
         return
     shannon = ctx.metrics.shannon
     if shannon is not None and shannon < ctx.config.min_shannon:
+        shown, limit = _compared(shannon, ctx.config.min_shannon, "2f")
         yield Finding(
             "SV021",
             Severity.NOTICE,
             "Low species diversity",
-            f"Shannon index {shannon:.2f} is below {ctx.config.min_shannon:.2f}.",
+            f"Shannon index {shown} is below {limit}.",
             value=shannon,
             threshold=ctx.config.min_shannon,
         )
@@ -418,12 +487,12 @@ def check_species_diversity(ctx: InspectionContext) -> Iterable[Finding]:
     if shares:
         species, share = next(iter(shares.items()))
         if share > ctx.config.max_species_share:
+            shown, limit = _compared(share, ctx.config.max_species_share, "0%")
             yield Finding(
                 "SV022",
                 Severity.NOTICE,
                 "Single-species dominance",
-                f"{species} accounts for {share:.0%} of stems, above the "
-                f"{ctx.config.max_species_share:.0%} limit.",
+                f"{species} accounts for {shown} of stems, above the {limit} limit.",
                 subject=f"species:{species}",
                 value=share,
                 threshold=ctx.config.max_species_share,
@@ -448,7 +517,9 @@ def check_height_anomalies(ctx: InspectionContext) -> Iterable[Finding]:
         model = ctx.species_models.get(key, ctx.model)
         scope = f"the {key} " if key else "the pooled "
         for tree, residual, z in residual_scores(model, members):
-            if abs(z) < ctx.config.height_residual_z:
+            # Documented as departing by *more than* the threshold, so a score
+            # sitting exactly on it is not an outlier.
+            if abs(z) <= ctx.config.height_residual_z:
                 continue
             direction = "taller" if residual > 0 else "shorter"
             yield Finding(
@@ -472,16 +543,16 @@ def check_dbh_outliers(ctx: InspectionContext) -> Iterable[Finding]:
     diameters = [tree.dbh_cm for tree in ctx.field_trees or [] if tree.dbh_cm and tree.dbh_cm > 0]
     if len(diameters) < 5:
         return
-    mean = sum(diameters) / len(diameters)
-    variance = sum((d - mean) ** 2 for d in diameters) / (len(diameters) - 1)
-    stdev = math.sqrt(variance)
+    mean = mean_of(diameters)
+    stdev = stdev_of(diameters, mean)
     if stdev == 0:
         return
     for tree in ctx.field_trees or []:
         if not tree.dbh_cm or tree.dbh_cm <= 0:
             continue
         z = (tree.dbh_cm - mean) / stdev
-        if abs(z) < ctx.config.dbh_outlier_z:
+        # "More than" the threshold, so equality is not an outlier.
+        if abs(z) <= ctx.config.dbh_outlier_z:
             continue
         yield Finding(
             "SV031",
@@ -554,11 +625,11 @@ def check_implausible_dimensions(ctx: InspectionContext) -> Iterable[Finding]:
         if tree.height_m is not None and tree.height_m <= 0:
             problems.append(f"height {tree.height_m:.1f} m is not positive")
         if tree.dbh_cm is not None and tree.dbh_cm > cfg.max_plausible_dbh_cm:
-            problems.append(f"DBH {tree.dbh_cm:.1f} cm exceeds {cfg.max_plausible_dbh_cm:.0f} cm")
+            shown, limit = _compared(tree.dbh_cm, cfg.max_plausible_dbh_cm, "1f", "0f")
+            problems.append(f"DBH {shown} cm exceeds {limit} cm")
         if tree.height_m is not None and tree.height_m > cfg.max_plausible_height_m:
-            problems.append(
-                f"height {tree.height_m:.1f} m exceeds {cfg.max_plausible_height_m:.0f} m"
-            )
+            shown, limit = _compared(tree.height_m, cfg.max_plausible_height_m, "1f", "0f")
+            problems.append(f"height {shown} m exceeds {limit} m")
         if problems:
             yield Finding(
                 "SV042",
@@ -599,7 +670,9 @@ def check_detection_agreement(ctx: InspectionContext) -> Iterable[Finding]:
     if match is None:
         return
     cfg = ctx.config
-    if match.recall < cfg.min_recall:
+    # An undefined ratio is not a poor one: with no field stems there is no
+    # recall to be low, and with no detections there is no precision.
+    if match.recall is not None and match.recall < cfg.min_recall:
         yield Finding(
             "SV050",
             Severity.WARNING,
@@ -611,7 +684,7 @@ def check_detection_agreement(ctx: InspectionContext) -> Iterable[Finding]:
             value=match.recall,
             threshold=cfg.min_recall,
         )
-    if match.precision < cfg.min_precision:
+    if match.precision is not None and match.precision < cfg.min_precision:
         yield Finding(
             "SV051",
             Severity.WARNING,
@@ -694,6 +767,31 @@ class InspectionReport:
         return payload
 
 
+def _observed_trees(chm: Grid | None, trees: Sequence[Tree]) -> list[Tree]:
+    """The stems the canopy model could have had something to say about.
+
+    A detector reports what it can see, so a stem standing where the raster
+    holds no measurement is not a stem it missed — there was nothing there to
+    miss it with.  Counting those against recall turned a hole in the coverage
+    into a warning about the sensor: a plot observed in one corner and nodata
+    everywhere else reported half its stems as omissions.
+
+    Coverage is a property of each location, not of the plot: the whole-raster
+    check that came before this only recognised a raster with no valid cell at
+    all, and every partly-covered plot went on being judged as though it were
+    fully covered.  Stems outside the extent are excluded for the same reason,
+    and SV043 reports them separately.
+    """
+    if chm is None:
+        return list(trees)
+    observed: list[Tree] = []
+    for tree in trees:
+        cell = chm.cell_of(tree.x, tree.y)
+        if cell is not None and chm.get(*cell) is not None:
+            observed.append(tree)
+    return observed
+
+
 def inspect_stand(
     *,
     chm: Grid | None = None,
@@ -728,9 +826,18 @@ def inspect_stand(
     if area_ha is None or area_ha <= 0:
         raise ValueError("area_ha must be supplied and positive when no raster is given")
 
+    # A raster with no valid cell has measured nothing.  Detection, gap mapping
+    # and the canopy summary all describe observations, so with none to
+    # describe they are absent rather than zero.  Running them anyway reported
+    # a cover of 0 %, a gap fraction of 0 and — worst of the three — matched a
+    # field inventory against an empty detection, so every stem came back as
+    # missed by a sensor that had never seen anything, and SV050 failed a
+    # ``--fail-on warning`` run over a raster nobody had looked at.
+    observed = chm is not None and chm.has_observations
+
     detection: DetectionResult | None = None
     gaps: list[CanopyGap] = []
-    if chm is not None:
+    if chm is not None and observed:
         if run_detection:
             detection = detect_trees(chm, detection_config or DetectionConfig())
         gaps = find_gaps(
@@ -758,12 +865,13 @@ def inspect_stand(
     if field_trees is not None:
         analysis_trees = field_trees
         source = "field"
-    elif detection is not None:
+    elif detection is not None and observed:
         analysis_trees = trees_from_crowns(detection.crowns, dbh_model=model)
         source = "detected"
     else:
-        # Only a raster, with detection switched off: nothing looked for stems,
-        # so the summary below records that the stocking is unknown.
+        # Nothing looked for stems — either detection was switched off, or the
+        # raster holds no measured cell to look in.  Either way the stocking is
+        # unknown, which the summary below records instead of guessing zero.
         analysis_trees = []
         source = "none"
 
@@ -774,7 +882,9 @@ def inspect_stand(
     )
     match: MatchResult | None = None
     if detection is not None and field_trees is not None:
-        match = match_trees(detection.crowns, field_trees, tolerance=config.match_tolerance_m)
+        match = match_trees(
+            detection.crowns, _observed_trees(chm, field_trees), tolerance=config.match_tolerance_m
+        )
 
     ctx = InspectionContext(
         config=config,
@@ -798,11 +908,11 @@ def inspect_stand(
     findings.sort(key=lambda f: (-int(f.severity), f.code, f.subject))
 
     canopy_summary: dict[str, object] = {}
-    if chm is not None:
+    if chm is not None and observed:
         stats = chm.stats()
         canopy_summary = {
             "cover": round(canopy_cover(chm, config.canopy_threshold), 4),
-            "gap_fraction": round(1.0 - canopy_cover(chm, config.canopy_threshold), 4),
+            "gap_fraction": round(gap_fraction(chm, threshold=config.canopy_threshold), 4),
             "rugosity_m": round(rugosity(chm, threshold=config.canopy_threshold), 3),
             "mean_height_m": _round(stats.mean, 3),
             "max_height_m": _round(stats.maximum, 3),

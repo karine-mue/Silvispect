@@ -39,6 +39,23 @@ silent: a stand nobody counted has *unknown* stocking, not zero stocking. A
 detector that did run and found nothing is a different matter — that is
 evidence of an empty stand, and SV001 fires.
 
+Coverage is judged **cell by cell**. A field stem standing where the raster
+holds no measurement is not a stem the detector missed — there was nothing
+there to miss it with — so it is left out of the detection-agreement rules
+(SV050–SV052) rather than counted as an omission. Stems outside the extent are
+excluded for the same reason and reported separately by SV043. Everything else
+about the stem, including every data-quality and stocking rule, is unaffected.
+
+A canopy model whose cells are *all* nodata is the first case, not the second.
+There is nothing to look at, so detection, gap mapping and the canopy summary
+do not run at all: `metrics_source` is `none`, `tree_count` is `null`, the
+`detection`, `match` and `gaps` blocks are absent, `canopy` is empty, and the
+rules that read them — SV010, SV012, SV011 and the detection-agreement rules
+SV050–SV052 — stay silent. In particular no inventory is matched against an
+empty detection, which used to report every field stem as missed by a sensor
+that had never seen anything and could fail a `--fail-on warning` run. One
+valid cell is enough to make the raster an observation.
+
 ---
 
 ## SV00x — stocking and density
@@ -80,6 +97,11 @@ them, so tightening the criterion cannot conjure this finding into existence.
 Gaps whose *untrimmed* sub-canopy area reaches the plot boundary are truncated
 by the extent, so their area is a lower bound and their severity is reduced to
 `warning`.
+
+`min_gap_area` is the reporting floor and `max_gap_area` the limit this rule
+enforces, so a profile setting the floor above the limit is refused rather than
+applied: it would delete exactly the openings the rule exists to report, and a
+plot with a 100 m² gap against a 50 m² limit came back clean.
 
 ### SV012 High open-canopy fraction — `notice`
 More than `max_gap_fraction` (default 0.30) of the plot is below the canopy

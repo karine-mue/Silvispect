@@ -145,11 +145,18 @@ Reports the fitted parameters, RMSE and R². This fits one pooled curve; the
 Derive a canopy height model.
 
 ```console
-$ silvispect chm --dsm DSM.ASC --dtm DTM.ASC [-o CHM.ASC]
+$ silvispect chm --dsm DSM.ASC --dtm DTM.ASC [-o CHM.ASC] [--precision N]
 ```
 
 The two rasters must share shape, cell size and origin. Negative heights are
 clamped to zero; nodata in either input stays nodata.
+
+By default the model is written as the shortest text that reads back as the
+same height, so analysing the file gives what analysing the difference would
+have given. Any fixed number of decimals merges heights that differ below the
+last one into a plateau, and a plateau has no apex, so the detector finds
+different trees in it. `--precision N` rounds to `N` decimals when a smaller
+file matters more than that.
 
 ---
 

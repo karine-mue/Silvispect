@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import __version__
 from .allometry import DEFAULT_MODEL, MODELS, AllometryError, fit_height_diameter
-from .canopy import canopy_cover, canopy_height_model, find_gaps
+from .canopy import canopy_cover, canopy_height_model, find_gaps, gap_fraction
 from .detect import DetectionConfig, detect_trees
 from .grid import Grid, GridError
 from .inspection import InspectionConfig, Severity, inspect_stand
@@ -60,6 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
     chm.add_argument("--dsm", required=True, type=Path, help="digital surface model (.asc)")
     chm.add_argument("--dtm", required=True, type=Path, help="digital terrain model (.asc)")
     chm.add_argument("-o", "--output", type=Path, help="write the canopy height model here")
+    chm.add_argument(
+        "--precision",
+        type=int,
+        default=None,
+        help="decimals to write; omit to write the shortest text that reads back as the "
+        "same height, so the derived model is the one the analysis would have used. "
+        "Any fixed number of decimals merges heights that differ below it into a "
+        "plateau, which moves the apexes the detector finds",
+    )
     chm.set_defaults(handler=_cmd_chm)
 
     detect = subparsers.add_parser("detect", help="detect trees and delineate crowns")
@@ -154,7 +163,7 @@ def _cmd_chm(args: argparse.Namespace, out) -> int:
     dtm = Grid.read(args.dtm)
     chm = canopy_height_model(dsm, dtm)
     if args.output:
-        chm.write(args.output)
+        chm.write(args.output, precision=args.precision)
         print(f"wrote {args.output}", file=out)
     stats = chm.stats()
     print(
@@ -180,7 +189,7 @@ def _cmd_detect(args: argparse.Namespace, out) -> int:
     if args.labels:
         result.label_grid.write(args.labels)
     if args.json:
-        print(json.dumps(result.as_dict(), indent=2), file=out)
+        print(json.dumps(result.as_dict(), indent=2, allow_nan=False), file=out)
         return EXIT_OK
     print(
         f"detected {len(result.crowns)} trees "
@@ -211,7 +220,7 @@ def _cmd_metrics(args: argparse.Namespace, out) -> int:
     trees = read_trees(args.inventory)
     metrics = stand_metrics(trees, args.area_ha, live_only=not args.include_dead)
     if args.json:
-        print(json.dumps(metrics.as_dict(), indent=2), file=out)
+        print(json.dumps(metrics.as_dict(), indent=2, allow_nan=False), file=out)
         return EXIT_OK
     for key, value in metrics.as_dict().items():
         if isinstance(value, dict):
@@ -231,9 +240,9 @@ def _cmd_gaps(args: argparse.Namespace, out) -> int:
         chm, threshold=args.threshold, min_area=args.min_area, min_width=args.min_width
     )
     if args.json:
-        print(json.dumps([gap.as_dict() for gap in gaps], indent=2), file=out)
+        print(json.dumps([gap.as_dict() for gap in gaps], indent=2, allow_nan=False), file=out)
         return EXIT_OK
-    open_fraction = 1.0 - canopy_cover(chm, args.threshold)
+    open_fraction = gap_fraction(chm, threshold=args.threshold)
     print(
         f"{len(gaps)} gaps at or above {args.min_area:.0f} m2 and {args.min_width:.1f} m wide; "
         f"{open_fraction:.1%} of the plot is below {args.threshold:.1f} m",
@@ -264,7 +273,7 @@ def _cmd_match(args: argparse.Namespace, out) -> int:
     result = detect_trees(chm)
     match = match_trees(result.crowns, reference, tolerance=args.tolerance)
     if args.json:
-        print(json.dumps(match.as_dict(), indent=2), file=out)
+        print(json.dumps(match.as_dict(), indent=2, allow_nan=False), file=out)
         return EXIT_OK
     for key, value in match.as_dict().items():
         print(f"{key:<16} {_fmt(value)}", file=out)
@@ -275,7 +284,7 @@ def _cmd_allometry(args: argparse.Namespace, out) -> int:
     trees = read_trees(args.inventory)
     model = fit_height_diameter(trees, model=args.model)
     if args.json:
-        print(json.dumps(model.as_dict(), indent=2), file=out)
+        print(json.dumps(model.as_dict(), indent=2, allow_nan=False), file=out)
         return EXIT_OK
     print(f"model      {model.name}", file=out)
     print(f"equation   {model.spec.description}", file=out)
@@ -386,6 +395,13 @@ def _fmt(value: object) -> str:
     if value is None:
         return "-"
     if isinstance(value, float):
+        # Grouped decimals read well for the heights a forest actually has, and
+        # become a wall of digits for the ones it does not: a raster holding
+        # 1e200 is finite and accepted, but printing its mean in full spends
+        # two hundred characters saying nothing.  Past the range where a metre
+        # is a plausible unit, fall back to exponent notation.
+        if value and not -1e12 < value < 1e12:
+            return f"{value:.4g}"
         return f"{value:,.3f}".rstrip("0").rstrip(".")
     return str(value)
 

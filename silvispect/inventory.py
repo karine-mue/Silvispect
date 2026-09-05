@@ -5,7 +5,8 @@ from __future__ import annotations
 import csv
 import io
 import math
-from collections.abc import Iterable, Sequence
+import sys
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -64,6 +65,9 @@ COLUMN_ALIASES: dict[str, str] = {
 
 LIVE_STATUSES = frozenset({"live", "living", "alive", "l", "1"})
 
+#: Largest diameter whose basal area is still a finite float.
+MAX_DBH_CM = 200.0 * math.sqrt(sys.float_info.max / math.pi)
+
 
 class InventoryError(ValueError):
     """Raised for malformed inventory input."""
@@ -87,6 +91,27 @@ class Tree:
     height_m: float | None = None
     crown_diameter_m: float | None = None
     status: str = "live"
+
+    def __post_init__(self) -> None:
+        for name in ("x", "y"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value):
+                raise InventoryError(f"{name} must be a finite coordinate, got {value!r}")
+        for name in ("dbh_cm", "height_m", "crown_diameter_m"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if not math.isfinite(float(value)):
+                raise InventoryError(f"{name} must be finite when present, got {value!r}")
+        # A stem whose basal area cannot be represented has no usable metrics at
+        # all: every summary that reaches it overflows part-way through, after
+        # the earlier rows have already been folded in.  Refusing the record is
+        # the only answer that keeps "accepted" and "summarisable" the same set.
+        if self.dbh_cm is not None and self.dbh_cm > MAX_DBH_CM:
+            raise InventoryError(
+                f"dbh_cm above {MAX_DBH_CM:.3e} has no representable basal area, "
+                f"got {self.dbh_cm!r}"
+            )
 
     @property
     def is_live(self) -> bool:
@@ -169,12 +194,32 @@ def parse_trees(text: str) -> list[Tree]:
     except StopIteration:
         return []
     keys = [_normalise_key(name) for name in header]
+    # Two headings can normalise onto one field — ``x`` and ``easting`` both
+    # mean the abscissa — and folding the row into a dict kept whichever came
+    # last.  A file with ``x,easting,y`` reported the easting as the x of every
+    # stem and said nothing about the column it had dropped.  Which of the two
+    # was meant is not the reader's to guess.
+    columns: dict[str, list[str]] = {}
+    for name, key in zip(header, keys, strict=True):
+        columns.setdefault(key, []).append(name.strip())
+    duplicated = {key: names for key, names in columns.items() if len(names) > 1}
+    if duplicated:
+        detail = "; ".join(
+            f"{key} from " + ", ".join(repr(name) for name in names)
+            for key, names in sorted(duplicated.items())
+        )
+        raise InventoryError(f"inventory CSV names the same field twice: {detail}")
     if "x" not in keys or "y" not in keys:
         raise InventoryError("inventory CSV must provide 'x' and 'y' columns")
     trees: list[Tree] = []
     for row_number, row in enumerate(reader, start=2):
         if not any(cell.strip() for cell in row):
             continue
+        # A row with more fields than headings has data no column claims.
+        # Silently dropping the tail hid a whole misaligned file; a trailing
+        # separator, which adds only blanks, is still fine.
+        if len(row) > len(keys) and any(cell.strip() for cell in row[len(keys) :]):
+            raise InventoryError(f"row {row_number}: {len(row)} fields for {len(keys)} columns")
         record = {key: (row[i] if i < len(row) else "") for i, key in enumerate(keys)}
         x = _to_float(record.get("x"), field_name="x", row_number=row_number)
         y = _to_float(record.get("y"), field_name="y", row_number=row_number)
@@ -282,23 +327,33 @@ class MatchResult:
         return len(self.matches)
 
     @property
-    def recall(self) -> float:
-        """Share of reference trees that were detected."""
+    def recall(self) -> float | None:
+        """Share of reference trees that were detected, or ``None`` if there are none.
+
+        A share of nothing is not zero.  Reporting ``0.0`` for an empty field
+        reference read as measured failure, and the inspection warned that
+        0 of 0 stems had been found — a complaint about a population nobody
+        had surveyed.
+        """
         reference = self.matched + len(self.omissions)
-        return self.matched / reference if reference else 0.0
+        return self.matched / reference if reference else None
 
     @property
-    def precision(self) -> float:
-        """Share of detections that correspond to a reference tree."""
+    def precision(self) -> float | None:
+        """Share of detections that hit a reference tree, or ``None`` if there are none."""
         detected = self.matched + len(self.commissions)
-        return self.matched / detected if detected else 0.0
+        return self.matched / detected if detected else None
 
     @property
-    def f1(self) -> float:
-        denominator = self.recall + self.precision
+    def f1(self) -> float | None:
+        """Harmonic mean of recall and precision; ``None`` unless both are defined."""
+        recall, precision = self.recall, self.precision
+        if recall is None or precision is None:
+            return None
+        denominator = recall + precision
         if denominator == 0:
             return 0.0
-        return 2 * self.recall * self.precision / denominator
+        return 2 * recall * precision / denominator
 
     @property
     def height_bias(self) -> float | None:
@@ -335,13 +390,162 @@ class MatchResult:
             "omissions": len(self.omissions),
             "commissions": len(self.commissions),
             "tolerance_m": self.tolerance,
-            "recall": round(self.recall, 4),
-            "precision": round(self.precision, 4),
-            "f1": round(self.f1, 4),
+            "recall": _round_or_none(self.recall, 4),
+            "precision": _round_or_none(self.precision, 4),
+            "f1": _round_or_none(self.f1, 4),
             "height_bias_m": _round_or_none(self.height_bias, 3),
             "height_rmse_m": _round_or_none(self.height_rmse, 3),
             "mean_offset_m": _round_or_none(self.mean_offset, 3),
         }
+
+
+def _min_cost_assignment(cost: list[list[int]]) -> list[int]:
+    """Assign every row a distinct column at minimum total cost.
+
+    The Jonker-Volgenant shortest-augmenting-path form of the Hungarian
+    algorithm.  ``cost`` must be rectangular with at least as many columns as
+    rows; the column chosen for each row is returned.  Costs are integers so
+    that the search is exact — the caller encodes an ordering, not a
+    measurement, and floating point would blur the very ties this resolves.
+    """
+    rows = len(cost)
+    if rows == 0:
+        return []
+    cols = len(cost[0])
+    infinity = 1 + sum(max(abs(value) for value in row) for row in cost)
+    # ``potential_*`` are the dual variables; ``row_of`` maps a column to the
+    # row holding it, with ``0`` meaning free.  Index 0 of the column arrays is
+    # the virtual column each augmenting search starts from, so everything here
+    # is one-based against ``cost``.
+    potential_row = [0] * (rows + 1)
+    potential_col = [0] * (cols + 1)
+    row_of = [0] * (cols + 1)
+    came_from = [0] * (cols + 1)
+    for row in range(1, rows + 1):
+        row_of[0] = row
+        column = 0
+        slack = [infinity] * (cols + 1)
+        used = [False] * (cols + 1)
+        while True:
+            used[column] = True
+            current_row = row_of[column]
+            delta = infinity
+            next_column = 0
+            base = cost[current_row - 1]
+            for candidate in range(1, cols + 1):
+                if used[candidate]:
+                    continue
+                reduced = (
+                    base[candidate - 1] - potential_row[current_row] - potential_col[candidate]
+                )
+                if reduced < slack[candidate]:
+                    slack[candidate] = reduced
+                    came_from[candidate] = column
+                if slack[candidate] < delta:
+                    delta = slack[candidate]
+                    next_column = candidate
+            for candidate in range(cols + 1):
+                if used[candidate]:
+                    potential_row[row_of[candidate]] += delta
+                    potential_col[candidate] -= delta
+                else:
+                    slack[candidate] -= delta
+            column = next_column
+            if row_of[column] == 0:
+                break
+        while column:
+            previous = came_from[column]
+            row_of[column] = row_of[previous]
+            column = previous
+    assignment = [-1] * rows
+    for candidate in range(1, cols + 1):
+        if row_of[candidate]:
+            assignment[row_of[candidate] - 1] = candidate - 1
+    return assignment
+
+
+def _components(
+    crown_count: int, tree_count: int, candidates: Sequence[tuple[int, int, float]]
+) -> list[tuple[list[int], list[int], dict[tuple[int, int], float]]]:
+    """Split the candidate graph into independently solvable pieces.
+
+    Crowns and trees that share no candidate pair cannot influence each other's
+    outcome, and the objective is a sum over pairs, so each connected piece can
+    be optimised on its own.  Real inventories give tiny pieces — usually one
+    crown and one stem — which is what keeps the exact solver affordable.
+    """
+    parent = list(range(crown_count + tree_count))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for crown_index, tree_index, _ in candidates:
+        left, right = find(crown_index), find(crown_count + tree_index)
+        if left != right:
+            parent[left] = right
+
+    groups: dict[int, tuple[set[int], set[int], dict[tuple[int, int], float]]] = {}
+    for crown_index, tree_index, distance in candidates:
+        crowns, trees, edges = groups.setdefault(find(crown_index), (set(), set(), {}))
+        crowns.add(crown_index)
+        trees.add(tree_index)
+        edges[(crown_index, tree_index)] = distance
+    return [(sorted(crowns), sorted(trees), edges) for crowns, trees, edges in groups.values()]
+
+
+def _pair_by_distance(
+    candidates: Sequence[tuple[int, int, float]],
+    crown_count: int,
+    tree_count: int,
+    crown_rank: Callable[[int], tuple[float, str]],
+    tree_rank: Callable[[int], tuple[str, float]],
+) -> dict[int, int]:
+    """Pair crowns with trees, nearest distances first, exactly.
+
+    The objective is lexicographic over distances: honour as many pairs as
+    possible at the shortest distance, then as many as possible at the next,
+    and so on.  Settling one distance at a time and never looking further is
+    *not* enough to reach it — a tie at the shortest distance can be broken two
+    ways that both honour one pair there while only one of them leaves a
+    partner free for the next distance.  That is how identifiers used to leak
+    into the answer: two stems one metre either side of a crown were an
+    arbitrary choice on their own, but taking the wrong one stranded a second
+    crown two metres away, so relabelling the stems changed the match count.
+
+    The lexicographic objective is encoded as an integer weight per distance —
+    ``base`` raised to a power that falls with distance, with ``base`` larger
+    than any achievable pair count, so no number of farther pairs can outweigh
+    a single nearer one — and the exact optimum is found by a minimum-cost
+    assignment.  Ties in that optimum are settled by the caller's ranking.
+    """
+    matched: dict[int, int] = {}
+    for group_crowns, group_trees, edges in _components(crown_count, tree_count, candidates):
+        crown_order = sorted(group_crowns, key=crown_rank)
+        tree_order = sorted(group_trees, key=tree_rank)
+        tiers = sorted(set(edges.values()))
+        rank_of_distance = {distance: index for index, distance in enumerate(tiers)}
+        base = min(len(crown_order), len(tree_order)) + 1
+        weights = [base ** (len(tiers) - 1 - index) for index in range(len(tiers))]
+
+        # One column per candidate stem, plus one unclaimed column per crown so
+        # that leaving a crown unpaired is always available at zero cost.
+        width = len(tree_order) + len(crown_order)
+        cost = [[0] * width for _ in crown_order]
+        for row, crown in enumerate(crown_order):
+            for column, tree in enumerate(tree_order):
+                distance = edges.get((crown, tree))
+                if distance is not None:
+                    cost[row][column] = -weights[rank_of_distance[distance]]
+
+        for row, column in enumerate(_min_cost_assignment(cost)):
+            if column < len(tree_order):
+                crown, tree = crown_order[row], tree_order[column]
+                if (crown, tree) in edges:
+                    matched[crown] = tree
+    return matched
 
 
 def match_trees(
@@ -351,38 +555,54 @@ def match_trees(
     tolerance: float = 2.5,
     live_only: bool = True,
 ) -> MatchResult:
-    """Greedily pair crowns with reference trees by planimetric distance.
+    """Pair crowns with reference trees by planimetric distance.
 
-    Candidate pairs closer than ``tolerance`` are considered in ascending
-    distance order and accepted while both partners are still unpaired, which
-    yields a stable one-to-one assignment without needing a full Hungarian
-    solve.
+    Candidate pairs closer than ``tolerance`` compete under one objective: pair
+    as many crowns as possible at the shortest distance present, then — without
+    giving any of those up — as many as possible at the next distance, and so
+    on.  That objective is a function of the geometry alone, so how many pairs
+    are reported does not depend on the order the records were read in, on the
+    identifiers they carry, or on how the plot is oriented on the map.
+
+    Only the *count* at each distance is pinned by geometry.  Where the geometry
+    is symmetric — two crowns and two stems mutually equidistant, say — several
+    pairings are equally optimal and something outside the geometry has to
+    choose between them; identifiers do, because they travel with the records
+    through reordering and through any rigid motion of the plot.
     """
     if tolerance <= 0:
         raise InventoryError("tolerance must be positive")
     targets = [tree for tree in reference if tree.is_live] if live_only else list(reference)
 
-    candidates: list[tuple[float, int, int]] = []
+    candidates: list[tuple[int, int, float]] = []
     for i, crown in enumerate(crowns):
         for j, tree in enumerate(targets):
             distance = math.hypot(crown.x - tree.x, crown.y - tree.y)
             if distance <= tolerance:
-                candidates.append((distance, i, j))
-    candidates.sort()
+                candidates.append((i, j, distance))
 
-    used_crowns: set[int] = set()
-    used_trees: set[int] = set()
-    matches: list[tuple[Crown, Tree, float]] = []
-    for distance, i, j in candidates:
-        if i in used_crowns or j in used_trees:
-            continue
-        used_crowns.add(i)
-        used_trees.add(j)
-        matches.append((crowns[i], targets[j], distance))
+    def crown_rank(index: int) -> tuple[float, str]:
+        return (-crowns[index].height, str(crowns[index].tree_id))
 
-    matches.sort(key=lambda item: item[0].tree_id)
-    omissions = tuple(tree for j, tree in enumerate(targets) if j not in used_trees)
-    commissions = tuple(crown for i, crown in enumerate(crowns) if i not in used_crowns)
+    def tree_rank(index: int) -> tuple[str, float]:
+        return (targets[index].tree_id, -(targets[index].height_m or 0.0))
+
+    matched_crown = _pair_by_distance(candidates, len(crowns), len(targets), crown_rank, tree_rank)
+    matched_tree = {tree: crown for crown, tree in matched_crown.items()}
+
+    matches = sorted(
+        (
+            (
+                crowns[i],
+                targets[j],
+                math.hypot(crowns[i].x - targets[j].x, crowns[i].y - targets[j].y),
+            )
+            for i, j in matched_crown.items()
+        ),
+        key=lambda item: item[0].tree_id,
+    )
+    omissions = tuple(tree for j, tree in enumerate(targets) if j not in matched_tree)
+    commissions = tuple(crown for i, crown in enumerate(crowns) if i not in matched_crown)
     return MatchResult(tuple(matches), omissions, commissions, tolerance)
 
 

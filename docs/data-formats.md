@@ -141,6 +141,27 @@ write_trees(live, "live-only.csv", precision=2)
 Output always uses the canonical column order, so a read/write round trip
 normalises a messy file.
 
+**Inventory CSV is a quantised record, not an exact copy.** Coordinates and
+measurements are written to `precision` decimals — three by default, a
+millimetre, which is finer than any field instrument reports and is the
+resolution a stem position is actually known to. Writing and reading back is
+therefore *not* an identity on the numbers: a stem at `x = 2.5004` is written
+as `2.5`, so a match tolerance of exactly `2.5 m` excludes it before the round
+trip and admits it afterwards. Raise `precision` if a downstream comparison
+needs a finer record than a millimetre.
+
+That resolution bounds what a diameter *class* can mean. `class_width` is
+refused below **0.001 cm**, a hundredth of a millimetre: a band narrower than
+the record it is cut from separates stems the file cannot tell apart, and the
+decimal arithmetic behind the binning is sized from that floor rather than left
+open-ended. Ordinary widths — 0.1, 1, 2, 5 cm — are unaffected.
+
+This is the opposite of the choice `silvispect chm` makes, and deliberately so.
+A derived canopy height model is an *intermediate* that the next command
+analyses, so it defaults to text that reads back as the same float; an
+inventory is a *record of measurements*, and writing more decimals than the
+measurement has claims a precision the field data does not carry.
+
 ## Threshold profiles — JSON
 
 A flat object of `InspectionConfig` field names to numbers. Any subset may be
@@ -187,7 +208,18 @@ profile and [`findings.md`](findings.md) for what each threshold controls.
 
 `detection`, `match`, `allometry` and `gaps` are present only when the
 corresponding input was supplied. The output is strict JSON: absent statistics
-are `null`, never `NaN` or `Infinity`, so any parser can read it.
+are `null`, never `NaN` or `Infinity`, so any parser can read it. That holds
+for every command that writes JSON, and it is enforced rather than assumed —
+a number with no finite value stops the command instead of being printed.
+
+`recall`, `precision` and `f1` count only the field stems standing on a cell
+the canopy model actually measured; a stem in a nodata hole is not evidence
+about the detector either way.
+
+`recall`, `precision` and `f1` are `null` when their own denominator is empty:
+with no field stems there is no recall to report and with no detections there
+is no precision, and neither is zero. The agreement rules read them the same
+way and stay silent.
 
 `yield_basis_count` is the number of stems behind `volume_per_ha_m3` and
 `biomass_per_ha_t`. Both need a height as well as a diameter, so the totals

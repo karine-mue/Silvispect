@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["Grid", "GridError", "GridStats"]
+__all__ = ["Grid", "GridError", "GridStats", "mean_of", "rms_of", "stdev_of", "sum_of"]
 
 NODATA_DEFAULT = -9999.0
 
@@ -29,6 +29,83 @@ Value = float | None
 
 class GridError(ValueError):
     """Raised when a grid cannot be parsed or two grids are incompatible."""
+
+
+def sum_of(values: Sequence[float]) -> float:
+    """Total that stays exact, and that overflows only if the answer does.
+
+    ``sum`` rounds once per term and can pass the finite limit on a running
+    total whose final value is representable.  Accumulating in units of the
+    largest magnitude present removes both problems: the scaling is undone
+    once, at the end, so infinity is returned only when the true total really
+    is out of range.
+    """
+    if not values:
+        return 0.0
+    scale = max(abs(value) for value in values)
+    if scale == 0.0 or not math.isfinite(scale):
+        return math.fsum(values)
+    return scale * math.fsum(value / scale for value in values)
+
+
+def rms_of(values: Sequence[float]) -> float:
+    """Root mean square that cannot overflow on finite input.
+
+    Squaring first overflows for any magnitude above about ``1.3e154``, which
+    is far inside the range of diameters a stand table accepts, and yields
+    infinity for a quadratic mean that is perfectly ordinary.
+    """
+    count = len(values)
+    if count == 0:
+        raise GridError("root mean square of no values is undefined")
+    scale = max(abs(value) for value in values)
+    if scale == 0.0:
+        return 0.0
+    return scale * math.sqrt(math.fsum((value / scale) ** 2 for value in values) / count)
+
+
+def _check_finite(value: Value) -> None:
+    """Refuse a cell value the writer could not put in a file."""
+    if value is not None and not math.isfinite(value):
+        raise GridError(f"cell value {value!r} is not a finite number")
+
+
+def mean_of(values: Sequence[float]) -> float:
+    """Arithmetic mean that cannot overflow on finite input.
+
+    Every value a raster accepts must survive being summarised.  Adding first
+    and dividing afterwards overflows on three cells holding the largest finite
+    float, and dividing each term first rounds the running total just past the
+    limit on the same input — in both cases for a mean that is perfectly
+    representable.  Working in units of the largest magnitude present keeps
+    every term inside ``[-1, 1]``, and the scale is multiplied back in last.
+    """
+    count = len(values)
+    if count == 0:
+        raise GridError("mean of no values is undefined")
+    scale = max(abs(value) for value in values)
+    if scale == 0.0:
+        return 0.0
+    return scale * (math.fsum(value / scale for value in values) / count)
+
+
+def stdev_of(values: Sequence[float], mean: float | None = None) -> float:
+    """Sample standard deviation that cannot overflow on finite input.
+
+    The deviations are taken in units of the largest magnitude present, so
+    ``value - mean`` cannot overflow before the scaling that was meant to
+    protect it: a raster of ``-MAX`` and three ``MAX`` has a deviation of
+    exactly ``MAX``, which subtracting first turned into ``NaN``.
+    """
+    count = len(values)
+    if count < 2:
+        return 0.0
+    scale = max(abs(value) for value in values)
+    if scale == 0.0:
+        return 0.0
+    centre = (mean_of(values) if mean is None else mean) / scale
+    total = math.fsum((value / scale - centre) ** 2 for value in values)
+    return scale * math.sqrt(total / (count - 1))
 
 
 @dataclass(frozen=True)
@@ -76,6 +153,20 @@ class Grid:
     values: list[Value] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        # The geometry is held to the same standard as the cells: everything
+        # here is written into the header of the file, and ``parse`` refuses a
+        # header it cannot read as a finite number.  A raster built in memory
+        # with a cell size of ``inf`` passed every analysis, was written out,
+        # and was then refused by the reader that had just been told about it.
+        for name in ("ncols", "nrows"):
+            count = getattr(self, name)
+            if isinstance(count, bool) or count != int(count):
+                raise GridError(f"{name} must be a whole number, got {count!r}")
+            setattr(self, name, int(count))
+        for name in ("xllcorner", "yllcorner", "cellsize", "nodata_value"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value):
+                raise GridError(f"{name} must be a finite number, got {value!r}")
         if self.ncols <= 0 or self.nrows <= 0:
             raise GridError("grid must have a positive number of rows and columns")
         if self.cellsize <= 0:
@@ -100,7 +191,12 @@ class Grid:
         yllcorner: float = 0.0,
         nodata_value: float = NODATA_DEFAULT,
     ) -> Grid:
-        """Return a grid of ``nrows`` x ``ncols`` cells all set to ``value``."""
+        """Return a grid of ``nrows`` x ``ncols`` cells all set to ``value``.
+
+        Raises:
+            GridError: If ``value`` is not finite.  See :meth:`from_rows`.
+        """
+        _check_finite(value)
         return cls(
             ncols=ncols,
             nrows=nrows,
@@ -121,7 +217,16 @@ class Grid:
         yllcorner: float = 0.0,
         nodata_value: float = NODATA_DEFAULT,
     ) -> Grid:
-        """Build a grid from a sequence of equal-length rows (north row first)."""
+        """Build a grid from a sequence of equal-length rows (north row first).
+
+        Raises:
+            GridError: If any cell is not finite.  :meth:`parse` has always
+                refused ``inf`` and ``NaN`` in a file, so accepting them here
+                left a raster that could be built and analysed but not written
+                down and read back — which is how a canopy model came to be
+                written with ``inf`` in it and then rejected by its own reader.
+                A cell with no measurement is ``None``, not a non-number.
+        """
         if not rows:
             raise GridError("cannot build a grid from zero rows")
         ncols = len(rows[0])
@@ -130,6 +235,8 @@ class Grid:
         values: list[Value] = []
         for row in rows:
             values.extend(row)
+        for value in values:
+            _check_finite(value)
         return cls(
             ncols=ncols,
             nrows=len(rows),
@@ -161,6 +268,16 @@ class Grid:
     # ------------------------------------------------------------------
     # geometry
     # ------------------------------------------------------------------
+    @property
+    def has_observations(self) -> bool:
+        """Whether any cell of this raster was actually measured.
+
+        A raster of nothing but nodata covers ground that was never observed.
+        It is not a measurement of an empty place, and nothing downstream may
+        read it as one.
+        """
+        return any(value is not None for value in self.values)
+
     @property
     def cell_area(self) -> float:
         """Area of a single cell in square map units."""
@@ -266,16 +383,28 @@ class Grid:
                 yield (nrow, ncol)
 
     def window(self, row: int, col: int, radius: int, *, circular: bool = False) -> Iterator[Cell]:
-        """Yield in-bounds cells within ``radius`` cells of ``(row, col)``."""
+        """Yield in-bounds cells within ``radius`` cells of ``(row, col)``.
+
+        The offsets are clipped to the raster before they are walked, so the
+        cost is the number of cells actually yielded rather than the area of
+        the requested disc.  It has to be: the detector sizes its search window
+        from the height of the cell it is testing, and an accepted — if
+        implausible — height of 1e5 m asks for a radius of 5,501 cells.  On a
+        one-cell raster that is a single comparison worth of real work, but
+        walking the unclipped square spent thirty million.
+        """
         if radius < 0:
             raise GridError("radius must be non-negative")
-        for drow in range(-radius, radius + 1):
-            for dcol in range(-radius, radius + 1):
-                if circular and drow * drow + dcol * dcol > radius * radius:
-                    continue
-                nrow, ncol = row + drow, col + dcol
-                if self.in_bounds(nrow, ncol):
-                    yield (nrow, ncol)
+        squared = radius * radius
+        for drow in range(max(-radius, -row), min(radius, self.nrows - 1 - row) + 1):
+            span = radius
+            if circular:
+                # The widest in-disc offset on this row, so the column range is
+                # already circular and needs no per-cell rejection test.
+                span = math.isqrt(squared - drow * drow)
+            base = row + drow
+            for dcol in range(max(-span, -col), min(span, self.ncols - 1 - col) + 1):
+                yield (base, col + dcol)
 
     # ------------------------------------------------------------------
     # whole-grid operations
@@ -300,19 +429,49 @@ class Grid:
         return out
 
     def assert_aligned(self, other: Grid) -> None:
-        """Raise :class:`GridError` unless two grids share the same geometry."""
+        """Raise :class:`GridError` unless two grids share the same geometry.
+
+        Origins must agree to within a millionth of a cell.  The tolerance is a
+        fraction of the cell rather than a fixed distance because that is the
+        only scale the answer means anything on: a centimetre is nothing on a
+        10 m cell and a thousand cells on a millimetre one.  Expressing it in
+        metres, or leaving a relative tolerance on the coordinates themselves,
+        lets the allowance grow with the coordinate values — at an easting of
+        1e9 a half-cell shift passed as aligned, and two rasters a half cell
+        apart were subtracted cell for cell into a quietly wrong canopy model.
+
+        Alignment is a property of the pair, so the cell the tolerance is a
+        fraction of is taken from both grids rather than from whichever one the
+        call was written on.  Cellsizes only have to agree to a relative 1e-9,
+        and reading the fraction off the receiver alone left a band in which
+        ``a.combine(b)`` refused the very same pair that ``b.combine(a)``
+        accepted.  The smaller cell is the honest choice: it is the finer of
+        the two resolutions being claimed to line up.
+        """
         if (self.ncols, self.nrows) != (other.ncols, other.nrows):
             raise GridError("grids differ in shape")
         if not math.isclose(self.cellsize, other.cellsize, rel_tol=1e-9):
             raise GridError("grids differ in cellsize")
-        if not (
-            math.isclose(self.xllcorner, other.xllcorner, abs_tol=1e-6)
-            and math.isclose(self.yllcorner, other.yllcorner, abs_tol=1e-6)
+        tolerance = min(abs(self.cellsize), abs(other.cellsize)) * 1e-6
+        if (
+            abs(self.xllcorner - other.xllcorner) > tolerance
+            or abs(self.yllcorner - other.yllcorner) > tolerance
         ):
             raise GridError("grids differ in origin")
 
     def clip(self, minimum: float | None = None, maximum: float | None = None) -> Grid:
-        """Clamp valid values into ``[minimum, maximum]``."""
+        """Clamp valid values into ``[minimum, maximum]``.
+
+        Raises:
+            GridError: If a bound is not a finite number.  Clamping is a floor
+                and a ceiling, and neither ``inf`` nor ``NaN`` is one: a floor
+                of ``inf`` replaced every measured height with infinity, which
+                the writer then put in the file and the reader refused.  A
+                raster is only worth returning if it can be written down.
+        """
+        for name, bound in (("minimum", minimum), ("maximum", maximum)):
+            if bound is not None and not math.isfinite(bound):
+                raise GridError(f"{name} must be a finite number, got {bound!r}")
 
         def _clip(value: float) -> float:
             if minimum is not None:
@@ -355,7 +514,7 @@ class Grid:
 
     def smooth_mean(self, radius: int = 1) -> Grid:
         """Mean filter — suppresses fine noise before tree detection."""
-        return self.focal(lambda vals: sum(vals) / len(vals), radius, circular=True)
+        return self.focal(mean_of, radius, circular=True)
 
     def smooth_median(self, radius: int = 1) -> Grid:
         """Median filter — removes spikes while preserving crown edges."""
@@ -370,10 +529,9 @@ class Grid:
         if not values:
             return GridStats(0, nodata, None, None, None, None)
         count = len(values)
-        mean = sum(values) / count
+        mean = mean_of(values)
         if count > 1:
-            variance = sum((v - mean) ** 2 for v in values) / (count - 1)
-            stdev = math.sqrt(variance)
+            stdev = stdev_of(values, mean)
         else:
             stdev = 0.0
         return GridStats(count, nodata, min(values), max(values), mean, stdev)
@@ -429,6 +587,12 @@ class Grid:
                 break
             if len(parts) < 2:
                 raise GridError(f"header line {cursor + 1} has no value")
+            # Repeating a field is not a correction: the reader cannot know
+            # which of the two the writer meant, and keeping the last silently
+            # threw the first away.  "ncols 5" followed by "ncols 50" read a
+            # different raster out of the same body with no complaint.
+            if key in header:
+                raise GridError(f"header field {key!r} is given more than once")
             try:
                 header[key] = float(parts[1])
             except ValueError as exc:
@@ -442,10 +606,27 @@ class Grid:
         for line in lines[cursor:]:
             tokens.extend(line.split())
 
-        ncols = int(header["ncols"])
-        nrows = int(header["nrows"])
+        # A raster has a whole number of cells.  Truncating "ncols 1.9" to 1
+        # accepts a header nobody meant to write and reads the wrong number of
+        # values out of the body, so it is malformed input rather than a
+        # rounding question.
+        dimensions: dict[str, int] = {}
+        for name in ("ncols", "nrows"):
+            size = header[name]
+            if size != int(size):
+                raise GridError(f"header field {name!r} must be a whole number, got {size!r}")
+            dimensions[name] = int(size)
+        ncols = dimensions["ncols"]
+        nrows = dimensions["nrows"]
         cellsize = header["cellsize"]
         nodata = header.get("nodata_value", NODATA_DEFAULT)
+        # Corner and centre are two ways of stating the same origin, and they
+        # disagree by half a cell.  Preferring the corner discarded whichever
+        # of the two the writer had actually measured, so a header that states
+        # both is asked to state one.
+        for corner, centre in (("xllcorner", "xllcenter"), ("yllcorner", "yllcenter")):
+            if corner in header and centre in header:
+                raise GridError(f"header gives both {corner!r} and {centre!r}")
         if "xllcorner" in header:
             xll = header["xllcorner"]
         elif "xllcenter" in header:
@@ -471,15 +652,30 @@ class Grid:
                 # A height of infinity is not a measurement, and it would travel
                 # all the way to a report that cannot serialise it.
                 raise GridError(f"cell value {token!r} is not a finite number")
-            values.append(None if math.isclose(number, nodata, abs_tol=1e-9) else number)
+            # Absence is written as the sentinel the header declares and is read
+            # back by matching it exactly.  Treating merely *nearby* values as
+            # absent silently deleted measurements: with a sentinel of 0 the
+            # smallest positive number a float can hold, 5e-324, is written out
+            # in full and read back as nodata, and the band of swallowed values
+            # widened with the magnitude of the sentinel.
+            values.append(None if number == nodata else number)
         return cls(ncols, nrows, xll, yll, cellsize, nodata, values)
 
     @classmethod
     def read(cls, path: str | Path) -> Grid:
         return cls.parse(Path(path).read_text(encoding="utf-8"))
 
-    def to_text(self, *, precision: int = 3) -> str:
-        """Serialise to an ESRI ASCII Grid document."""
+    def to_text(self, *, precision: int | None = 3) -> str:
+        """Serialise to an ESRI ASCII Grid document.
+
+        ``precision`` is the number of decimals to write; ``None`` writes the
+        shortest decimal string that reads back as the same float, so the
+        document round-trips exactly.  Any fixed number of decimals quantises,
+        and quantisation is not a matter of degree here: two heights that differ
+        below the last decimal written become one plateau, which is a different
+        canopy surface.  Choosing a *larger* fixed precision only moves the
+        magnitude at which that happens.
+        """
         head = [
             f"ncols {self.ncols}",
             f"nrows {self.nrows}",
@@ -497,7 +693,7 @@ class Grid:
             )
         return "\n".join(head + body) + "\n"
 
-    def write(self, path: str | Path, *, precision: int = 3) -> Path:
+    def write(self, path: str | Path, *, precision: int | None = 3) -> Path:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(self.to_text(precision=precision), encoding="utf-8")
@@ -519,7 +715,11 @@ def _median(values: Iterable[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
-def _fmt(value: float, precision: int) -> str:
+def _fmt(value: float, precision: int | None) -> str:
+    if precision is None:
+        # ``repr`` of a float is the shortest string that reads back identically,
+        # so the value survives the round trip whatever its magnitude.
+        return repr(float(value))
     text = f"{value:.{precision}f}"
     if "." in text:
         text = text.rstrip("0").rstrip(".")

@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import heapq
 import math
-from dataclasses import dataclass, field
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 
-from .grid import Grid, GridError
+from .grid import Grid, GridError, mean_of
 
 __all__ = [
     "Crown",
@@ -58,7 +60,23 @@ class DetectionConfig:
     drop_fraction: float = 0.45
     min_crown_cells: int = 3
 
+    #: Fields that count cells and must therefore be whole numbers.
+    _COUNTS = ("smooth_radius", "min_crown_cells")
+
     def __post_init__(self) -> None:
+        for name, value in self.as_dict().items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise GridError(f"{name} must be a number, got {type(value).__name__}")
+            if not math.isfinite(value):
+                raise GridError(f"{name} must be a finite number, got {value!r}")
+        for name in self._COUNTS:
+            value = getattr(self, name)
+            if value != int(value):
+                raise GridError(f"{name} must be a whole number of cells, got {value!r}")
+            # A whole-valued float is a whole number of cells, so it is stored
+            # as one.  Accepting 1.0 and then handing it to ``range`` raised a
+            # TypeError from inside detection instead.
+            object.__setattr__(self, name, int(value))
         if self.min_height < 0:
             raise GridError("min_height must be non-negative")
         if self.smooth_radius < 0:
@@ -186,34 +204,216 @@ def crown_radius_limit(height: float, config: DetectionConfig) -> float:
     return config.crown_intercept + config.crown_slope * max(height, 0.0)
 
 
-def find_treetops(chm: Grid, config: DetectionConfig | None = None) -> list[TreeTop]:
+def find_treetops(
+    chm: Grid,
+    config: DetectionConfig | None = None,
+    *,
+    reference: Grid | None = None,
+) -> list[TreeTop]:
     """Locate local maxima using a height-dependent search window.
 
-    Plateaus of exactly equal height yield a single apex: the first cell in
-    row-major order wins, so results are deterministic.
+    A cell is a candidate apex unless a **strictly higher** cell lies inside
+    its own search window.  Equality never suppresses.  Ranking equal cells by
+    their position in the array is not a fact about the forest and it reverses
+    under reflection: on the four cells ``8 7 4 8`` the left peak was kept and
+    grew a three-cell crown down the 7 and the 4, while the mirror image
+    ``8 4 7 8`` kept the same *array* position, ran into the rising 7 after one
+    cell, and lost the crown to the minimum-size filter — one tree became none
+    on a raster that is the same forest seen from the other side.
+
+    A connected run of equal-height candidates is still **one** treetop: a flat
+    crown top is one tree, not twenty.  Its apex is the candidate nearest the
+    run's centre, and where two are equally near the denser surroundings win —
+    both of which mirror with the raster, unlike a row-major first.
+
+    ``reference`` is the raster the surroundings are read from when candidates
+    tie, and defaults to ``chm`` itself.  It exists because smoothing can erase
+    the very difference the tie needs: the mean filter turns ``2 3 / 4 9 /
+    3 2`` into a surface that is its own mirror image, leaving two equal maxima
+    that nothing in it can tell apart, while the raster it came from tells them
+    apart easily.  Detection therefore breaks its ties on the observations
+    rather than on the intermediate surface.
     """
     config = config or DetectionConfig()
-    tops: list[TreeTop] = []
+    reference = chm if reference is None else reference
+    rank = _lazy_rank(reference)
+    candidates: list[tuple[int, int, float]] = []
     for row, col, height in chm.valid_cells():
         if height < config.min_height:
             continue
         radius_cells = max(1, round(window_radius(height, config) / chm.cellsize))
-        here = row * chm.ncols + col
-        is_max = True
-        for nrow, ncol in chm.window(row, col, radius_cells, circular=True):
-            idx = nrow * chm.ncols + ncol
-            if idx == here:
-                continue
-            other = chm.values[idx]
-            if other is None:
-                continue
-            if other > height or (other == height and idx < here):
-                is_max = False
-                break
-        if is_max:
-            x, y = chm.cell_center(row, col)
-            tops.append(TreeTop(len(tops) + 1, row, col, x, y, height))
-    return tops
+        if any(
+            (other := chm.values[nrow * chm.ncols + ncol]) is not None and other > height
+            for nrow, ncol in chm.window(row, col, radius_cells, circular=True)
+        ):
+            continue
+        candidates.append((row, col, height))
+
+    height_of = {(row, col): height for row, col, height in candidates}
+    seen: set[tuple[int, int]] = set()
+    tops: list[TreeTop] = []
+    for row, col, height in candidates:
+        if (row, col) in seen:
+            continue
+        # One connected run of exactly equal height is one treetop.
+        plateau = [(row, col)]
+        seen.add((row, col))
+        queue = deque([(row, col)])
+        while queue:
+            here_row, here_col = queue.popleft()
+            for nrow, ncol in chm.neighbors(here_row, here_col, connectivity=8):
+                if (nrow, ncol) in seen or height_of.get((nrow, ncol)) != height:
+                    continue
+                seen.add((nrow, ncol))
+                plateau.append((nrow, ncol))
+                queue.append((nrow, ncol))
+        tops.append(_plateau_apex(chm, plateau, height, len(tops) + 1, rank))
+    return _ranked(reference, tops, rank)
+
+
+def _ranked(
+    chm: Grid, tops: list[TreeTop], rank: Callable[[tuple[int, int]], int]
+) -> list[TreeTop]:
+    """Order treetops tallest-first, breaking equal heights by outlook.
+
+    The order is not cosmetic: crowns are seeded in it, so when two equally
+    tall apexes reach for the same cell it decides which one keeps it.  Sorting
+    by coordinate reverses under reflection and handed the cell to the other
+    apex, which on a four-by-four raster lost a whole crown to the minimum-size
+    filter.  Heights alone settle almost every pair, so the canonical rank —
+    which costs eight passes over the raster — is only asked for on a tie.
+    """
+    by_height: dict[float, list[TreeTop]] = {}
+    for top in tops:
+        by_height.setdefault(top.height, []).append(top)
+
+    ordered: list[TreeTop] = []
+    for height in sorted(by_height, reverse=True):
+        tied = by_height[height]
+        if len(tied) > 1:
+            tied.sort(key=lambda top: rank((top.row, top.col)))
+        ordered.extend(tied)
+    return [replace(top, tree_id=index) for index, top in enumerate(ordered, start=1)]
+
+
+#: The eight symmetries of a rectangle, each as the place a cell moves to and
+#: the shape it moves into: ``(row, col, nrows, ncols)``.
+_FRAMES: tuple[Callable[[int, int, int, int], tuple[int, int, int, int]], ...] = (
+    lambda r, c, h, w: (r, c, h, w),
+    lambda r, c, h, w: (r, w - 1 - c, h, w),
+    lambda r, c, h, w: (h - 1 - r, c, h, w),
+    lambda r, c, h, w: (h - 1 - r, w - 1 - c, h, w),
+    lambda r, c, h, w: (c, r, w, h),
+    lambda r, c, h, w: (c, h - 1 - r, w, h),
+    lambda r, c, h, w: (w - 1 - c, r, w, h),
+    lambda r, c, h, w: (w - 1 - c, h - 1 - r, w, h),
+)
+
+
+def _lazy_rank(chm: Grid) -> Callable[[tuple[int, int]], int]:
+    """Build :func:`_canonical_rank` on first use, then reuse it.
+
+    Equal heights are rare on a measured surface, so most rasters never ask for
+    a rank at all and must not pay eight passes for the possibility.
+    """
+    cached: list[Callable[[tuple[int, int]], int]] = []
+
+    def rank(cell: tuple[int, int]) -> int:
+        if not cached:
+            cached.append(_canonical_rank(chm))
+        return cached[0](cell)
+
+    return rank
+
+
+def _canonical_rank(chm: Grid) -> Callable[[tuple[int, int]], int]:
+    """Return a cell ordering that survives every symmetry of the raster.
+
+    Two cells have to be separated by something that mirrors with the plot, or
+    the answer depends on which way the array happened to be written down.  A
+    sorted list of (distance, height) pairs seen from each cell is such a
+    quantity, and it separates almost every pair — but only almost.  Two cells
+    can have identical distance profiles without any symmetry relating them, in
+    which case the fallback to row and column order decides, and *that*
+    reverses: on ``8 5 / 21 5 / 5 8 / 5 8`` it picked the other physical apex
+    after a reflection and grew a four-cell crown where the original grew
+    three.
+
+    So the raster is put in a canonical orientation instead.  Each of the eight
+    symmetries is applied and the resulting readout compared; the smallest wins,
+    and a cell is ranked by where it lands under the winning ones.  Because
+    composing a symmetry with all eight gives back all eight, the winning
+    readout — and every cell's rank in it — is the same for a raster and for
+    any rotation or reflection of it.  And two cells tie here **exactly** when
+    some symmetry of the raster maps one to the other, which is the one case
+    where no rule could have separated them.
+    """
+    values = chm.values
+    nrows, ncols = chm.nrows, chm.ncols
+    best: tuple[int, int, tuple[tuple[int, float], ...]] | None = None
+    winners: list[Callable[[int, int, int, int], tuple[int, int, int, int]]] = []
+    for place in _FRAMES:
+        _, _, height, width = place(0, 0, nrows, ncols)
+        readout: list[tuple[int, float]] = [(0, 0.0)] * (height * width)
+        for row in range(nrows):
+            offset = row * ncols
+            for col in range(ncols):
+                new_row, new_col, _, _ = place(row, col, nrows, ncols)
+                value = values[offset + col]
+                # Absent sorts before every height, and never beside one.
+                readout[new_row * width + new_col] = (0, 0.0) if value is None else (1, value)
+        key = (height, width, tuple(readout))
+        if best is None or key < best:
+            best, winners = key, [place]
+        elif key == best:
+            winners.append(place)
+
+    def rank(cell: tuple[int, int]) -> int:
+        row, col = cell
+        places = (place(row, col, nrows, ncols) for place in winners)
+        return min(new_row * width + new_col for new_row, new_col, _, width in places)
+
+    return rank
+
+
+def _plateau_apex(
+    chm: Grid,
+    plateau: list[tuple[int, int]],
+    height: float,
+    tree_id: int,
+    rank: Callable[[tuple[int, int]], int],
+) -> TreeTop:
+    """Pick the one cell of an equal-height run that represents the treetop.
+
+    The centre of the run first, which mirrors with it.  Where several cells
+    are equally central — an even-sided or lopsided run — the one ranked first
+    in the raster's canonical orientation wins, and only a run whose members
+    are genuinely interchangeable, because a symmetry of the raster maps one
+    onto the other, is left with nothing to choose between them.
+
+    Centrality is measured in whole integers.  Dividing by the run length puts
+    a rounded mean on both sides of the comparison, and the rounding does not
+    survive a reflection: two cells equidistant from the centre of a run tied
+    one way up and, by a single ulp, not the other, which chose a different
+    apex and grew a different crown from it.  Scaling the offset by the square
+    of the run length keeps every term a whole number, and a whole number
+    mirrors exactly.
+    """
+    count = len(plateau)
+    row_sum = sum(row for row, _ in plateau)
+    col_sum = sum(col for _, col in plateau)
+
+    def offset(cell: tuple[int, int]) -> int:
+        return (cell[0] * count - row_sum) ** 2 + (cell[1] * count - col_sum) ** 2
+
+    nearest = min(offset(cell) for cell in plateau)
+    central = [cell for cell in plateau if offset(cell) == nearest]
+    if len(central) == 1:
+        row, col = central[0]
+    else:
+        row, col = min(central, key=lambda cell: (rank(cell), cell))
+    x, y = chm.cell_center(row, col)
+    return TreeTop(tree_id, row, col, x, y, height)
 
 
 def segment_crowns(
@@ -230,8 +430,19 @@ def segment_crowns(
     labels: list[int] = [0] * len(chm.values)
     apex_of: dict[int, TreeTop] = {top.tree_id: top for top in tops}
 
-    # (-height, tie-breaker, row, col, label, height of the recruiting cell)
-    heap: list[tuple[float, int, int, int, int, float]] = []
+    # (-height, squared cell distance from own apex, owning label, tie-breaker,
+    # row, col, label, height of the recruiting cell).  Equally tall cells are
+    # expanded nearest-apex first rather than in insertion order: when two
+    # crowns reach for the same cell, insertion order is the order the array
+    # happened to be scanned in, and it reverses under reflection.  The
+    # distance is counted in whole cells, so it travels with the plot exactly —
+    # differencing the map coordinates instead leaves a rounding that a
+    # reflection does not reproduce, and a tie decided by an ulp is a tie
+    # decided by nothing.  Where height and distance both tie, the contest is
+    # settled by which crown is ranked first, which is a property of the plot;
+    # only two fronts of the *same* crown fall through to insertion order,
+    # where the cell is claimed either way.
+    heap: list[tuple[float, int, int, int, int, int, int, float]] = []
     counter = 0
     for top in tops:
         idx = top.row * chm.ncols + top.col
@@ -239,14 +450,17 @@ def segment_crowns(
             continue
         labels[idx] = top.tree_id
         counter += 1
-        heapq.heappush(heap, (-top.height, counter, top.row, top.col, top.tree_id, top.height))
+        heapq.heappush(
+            heap,
+            (-top.height, 0, top.tree_id, counter, top.row, top.col, top.tree_id, top.height),
+        )
 
     members: dict[int, list[tuple[int, int]]] = {top.tree_id: [] for top in tops}
     for top in tops:
         members[top.tree_id].append((top.row, top.col))
 
     while heap:
-        _, _, row, col, label, parent_height = heapq.heappop(heap)
+        _, _, _, _, row, col, label, parent_height = heapq.heappop(heap)
         apex = apex_of[label]
         limit = crown_radius_limit(apex.height, config)
         floor = max(config.min_height, config.drop_fraction * apex.height)
@@ -257,16 +471,20 @@ def segment_crowns(
             value = chm.values[idx]
             if value is None or value < floor:
                 continue
-            if value > parent_height + 1e-9:
-                # Rising again: we have crossed into a neighbouring crown.
+            if value > parent_height and not math.isclose(value, parent_height, rel_tol=1e-9):
+                # Rising again: we have crossed into a neighbouring crown.  The
+                # allowance is relative because a canopy has no privileged
+                # unit: a fixed 1e-9 m swallowed a rise of 5e-10 m and then
+                # rejected the same forest measured in decimetres, so the crown
+                # gained or lost a cell according to the scale of the numbers.
                 continue
-            x, y = chm.cell_center(nrow, ncol)
-            if math.hypot(x - apex.x, y - apex.y) > limit:
+            reach = (nrow - apex.row) ** 2 + (ncol - apex.col) ** 2
+            if math.sqrt(reach) * chm.cellsize > limit:
                 continue
             labels[idx] = label
             members[label].append((nrow, ncol))
             counter += 1
-            heapq.heappush(heap, (-value, counter, nrow, ncol, label, value))
+            heapq.heappush(heap, (-value, reach, label, counter, nrow, ncol, label, value))
 
     crowns: list[Crown] = []
     kept_labels: set[int] = set()
@@ -276,15 +494,15 @@ def segment_crowns(
             continue
         heights = [chm.values[r * chm.ncols + c] for r, c in cells]
         valid = [h for h in heights if h is not None]
-        centres = [chm.cell_center(r, c) for r, c in cells]
-        max_extent = max(math.hypot(x - top.x, y - top.y) for x, y in centres)
+        span = max((r - top.row) ** 2 + (c - top.col) ** 2 for r, c in cells)
+        max_extent = math.sqrt(span) * chm.cellsize
         crowns.append(
             Crown(
                 tree_id=top.tree_id,
                 apex=top,
                 cells=tuple(cells),
                 area=len(cells) * chm.cell_area,
-                mean_height=sum(valid) / len(valid),
+                mean_height=mean_of(valid),
                 max_extent=max_extent,
             )
         )
@@ -318,6 +536,9 @@ def detect_trees(chm: Grid, config: DetectionConfig | None = None) -> DetectionR
     """Run the full detection pipeline: smooth, find maxima, delineate crowns."""
     config = config or DetectionConfig()
     smoothed = chm.smooth_mean(config.smooth_radius) if config.smooth_radius else chm.copy()
-    tops = find_treetops(smoothed, config)
+    # Ties are settled against the raster as measured.  Smoothing is allowed to
+    # make two candidates equal — that is what it is for — but it must not also
+    # be the thing that decides which of them wins.
+    tops = find_treetops(smoothed, config, reference=chm)
     crowns, label_grid = segment_crowns(smoothed, tops, config)
     return DetectionResult(crowns=crowns, config=config, label_grid=label_grid, smoothed=smoothed)

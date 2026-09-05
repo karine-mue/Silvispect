@@ -8,13 +8,12 @@ gap analysis, structural metrics — reads a CHM.
 
 from __future__ import annotations
 
-import heapq
 import math
 from collections import deque
-from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .grid import Grid, GridError
+from .geometry import Walls, distance_field, inscribed_circle, opening_field
+from .grid import Grid, GridError, mean_of, stdev_of
 
 __all__ = [
     "STRATA_BREAKS",
@@ -48,8 +47,26 @@ def canopy_height_model(dsm: Grid, dtm: Grid, *, floor: float = 0.0) -> Grid:
     Negative heights are a normalisation artefact rather than a physical
     quantity, so they are clamped instead of being discarded: a cell that
     measures slightly below ground is still a measured, treeless cell.
+
+    Raises:
+        GridError: If a cell's height is not representable.  A surface at the
+            largest finite float over a terrain at its negative has a height
+            that no float can hold; the subtraction returned infinity, the
+            writer put ``inf`` in the file, and the reader — which forbids
+            non-finite cells — then refused the model the command had just
+            said it had written.  The refusal belongs here, before anything is
+            written.
     """
-    chm = dsm.combine(dtm, lambda surface, terrain: surface - terrain)
+
+    def height(surface: float, terrain: float) -> float:
+        value = surface - terrain
+        if not math.isfinite(value):
+            raise GridError(
+                f"canopy height {surface!r} - {terrain!r} is not a representable number"
+            )
+        return value
+
+    chm = dsm.combine(dtm, height)
     return chm.clip(minimum=floor)
 
 
@@ -112,51 +129,13 @@ class CanopyGap:
         }
 
 
-def _chamfer(chm: Grid, seeds: Iterable[int], *, ceiling: float | None = None) -> list[float]:
-    """Distance in map units from every cell to the nearest seed cell.
-
-    Orthogonal steps cost one cell width and diagonal steps ``sqrt(2)`` cell
-    widths, which approximates the Euclidean distance closely enough for
-    morphology on a canopy raster.  ``ceiling`` stops the search early.
-    """
-    distances: list[float] = [math.inf] * len(chm.values)
-    frontier: list[tuple[float, int]] = []
-    for position in seeds:
-        distances[position] = 0.0
-        frontier.append((0.0, position))
-    heapq.heapify(frontier)
-
-    straight = chm.cellsize
-    diagonal = chm.cellsize * math.sqrt(2.0)
-    while frontier:
-        distance, position = heapq.heappop(frontier)
-        if distance > distances[position]:
-            continue
-        if ceiling is not None and distance > ceiling:
-            continue
-        row, col = divmod(position, chm.ncols)
-        for nrow, ncol in chm.neighbors(row, col, connectivity=8):
-            step = straight if (nrow == row or ncol == col) else diagonal
-            candidate = distance + step
-            index = nrow * chm.ncols + ncol
-            if candidate < distances[index]:
-                distances[index] = candidate
-                heapq.heappush(frontier, (candidate, index))
-    return distances
-
-
-def _distance_to_outside(chm: Grid) -> list[float]:
-    """Distance from each cell centre to just beyond the nearest grid edge."""
-    half = chm.cellsize / 2.0
-    return [
-        min(col, chm.ncols - 1 - col, row, chm.nrows - 1 - row) * chm.cellsize + half
-        for row in range(chm.nrows)
-        for col in range(chm.ncols)
-    ]
+def _blocked(chm: Grid, threshold: float) -> list[bool]:
+    """Cells a circle cannot enter: canopy at or above ``threshold``, or unknown."""
+    return [value is None or value >= threshold for value in chm.values]
 
 
 def _canopy_distance_field(chm: Grid, threshold: float) -> list[float]:
-    """Distance from every cell to the nearest canopy cell or plot edge.
+    """Exact distance from every cell centre to the nearest canopy cell or plot edge.
 
     **The plot edge counts as a boundary.**  Measuring only to canopy would let
     an opening that runs off the side of the raster claim an inscribed circle
@@ -164,26 +143,31 @@ def _canopy_distance_field(chm: Grid, threshold: float) -> list[float]:
     reported a 25 m gap width, which no circle inside it could have.  Nothing is
     known about the forest beyond the extent, so the honest bound is the extent:
     the reported width describes the opening *as mapped*, and ``touches_edge``
-    marks it as possibly continuing further.
+    marks it as possibly continuing further.  It also keeps every value finite
+    on a raster with no canopy at all.
 
-    Taking the minimum against the edge distance also covers a raster with no
-    canopy at all, where the chamfer search alone would leave every cell at
-    infinity — and JSON has no way to write that down.
+    **Distances are Euclidean, to the canopy's boundary.**  Two earlier forms
+    of this field were approximations.  A chamfer walk measured centre to
+    centre, so a one-cell opening claimed a two-cell circle; seeding the walk at
+    the boundary fixed its first step and left every later one octile — a
+    knight's move counted as ``1 + sqrt(2)`` where the crow flies ``sqrt(5)``,
+    which let a plus-shaped opening with a 3.16 m circle survive a 3.3 m
+    minimum.  The field is now a separable exact transform against the cell
+    squares (see :mod:`silvispect.geometry`), in map units.
     """
-    seeds = [
-        position for position, value in enumerate(chm.values) if value is None or value >= threshold
+    return [
+        value * chm.cellsize
+        for value in distance_field(_blocked(chm, threshold), chm.nrows, chm.ncols)
     ]
-    to_canopy = _chamfer(chm, seeds)
-    to_outside = _distance_to_outside(chm)
-    return [min(canopy, outside) for canopy, outside in zip(to_canopy, to_outside, strict=True)]
 
 
 def distance_to_canopy(chm: Grid, *, threshold: float = 2.0) -> Grid:
     """Distance from every cell to the nearest canopy cell or plot edge.
 
-    Cells at or above ``threshold`` are the sources and get distance zero.
-    Cells with no data are treated as unknown rather than as openings, so they
-    are sources too.  The plot edge bounds the result — see
+    Cells at or above ``threshold`` are walls and get distance zero.  Cells
+    with no data are treated as unknown rather than as openings, so they are
+    walls too.  The distance is exact and Euclidean, measured to the nearest
+    wall's *boundary*, and the plot edge bounds it — see
     :func:`_canopy_distance_field` for why.
     """
     out = chm.like()
@@ -191,6 +175,22 @@ def distance_to_canopy(chm: Grid, *, threshold: float = 2.0) -> Grid:
     # cell left to report as absent.
     out.values = list(_canopy_distance_field(chm, threshold))
     return out
+
+
+def _opening_values(
+    chm: Grid,
+    threshold: float,
+    *,
+    at_least: float = 0.0,
+    walls: Walls | None = None,
+    cells: list[float] | None = None,
+) -> list[float]:
+    """The opening function in cell units — see :func:`silvispect.geometry.opening_field`."""
+    if walls is None:
+        walls = Walls(_blocked(chm, threshold), chm.nrows, chm.ncols)
+    if cells is None:
+        cells = distance_field(walls.blocked, chm.nrows, chm.ncols)
+    return opening_field(walls, cells, at_least=at_least)
 
 
 def opening_radius_field(chm: Grid, *, threshold: float = 2.0) -> list[float]:
@@ -204,71 +204,67 @@ def opening_radius_field(chm: Grid, *, threshold: float = 2.0) -> list[float]:
     Computing the field once and thresholding it is not merely tidier than an
     erosion followed by a dilation — it is the only way to get a *monotone*
     answer.  Composing the two steps mixes two quantisations (a cut on the
-    distance field, then a fresh chamfer walk out of the eroded core), and the
-    result oscillates: on a treeless 10 m x 10 m plot the reported opening ran
-    64, 96, 64, 88, 60 cells as the requested width rose 1 m at a time, so
-    *tightening* ``min_width`` could enlarge a gap and raise a finding that a
-    looser setting did not.  A single scalar field per cell cannot do that: a
-    larger threshold always selects a subset.
+    distance field, then a fresh walk out of the eroded core), and the result
+    oscillates: on a treeless 10 m x 10 m plot the reported opening ran 64, 96,
+    64, 88, 60 cells as the requested width rose 1 m at a time, so *tightening*
+    ``min_width`` could enlarge a gap and raise a finding that a looser setting
+    did not.  A single scalar field per cell cannot do that: a larger threshold
+    always selects a subset.
 
-    Discs are painted largest-first and a cell already carrying a radius at
-    least as large is skipped, so each cell is settled by the biggest disc that
-    reaches it and the scan stays cheap on realistic canopies.
+    The field is exact: the union of every circle that fits, with the circles
+    enumerated in closed form from the walls rather than read off cell centres
+    — see :func:`silvispect.geometry.opening_field`.  Values are in map units.
     """
-    distances = _canopy_distance_field(chm, threshold)
-    radii = [0.0] * len(chm.values)
-    candidates = sorted(
-        (
-            position
-            for position, value in enumerate(chm.values)
-            if value is not None and value < threshold and distances[position] > 0.0
-        ),
-        key=lambda position: -distances[position],
-    )
-    cellsize = chm.cellsize
-    for position in candidates:
-        reach = distances[position]
-        if radii[position] >= reach:
-            continue  # a bigger disc already covers this cell
-        row, col = divmod(position, chm.ncols)
-        span = int(reach / cellsize)
-        for drow in range(-span, span + 1):
-            nrow = row + drow
-            if not 0 <= nrow < chm.nrows:
-                continue
-            dy = drow * cellsize
-            width = math.sqrt(max(0.0, reach * reach - dy * dy))
-            for dcol in range(-int(width / cellsize), int(width / cellsize) + 1):
-                ncol = col + dcol
-                if not 0 <= ncol < chm.ncols:
-                    continue
-                index = nrow * chm.ncols + ncol
-                if radii[index] < reach:
-                    radii[index] = reach
-    return radii
+    return [value * chm.cellsize for value in _opening_values(chm, threshold)]
 
 
-def _opened_gap_mask(chm: Grid, threshold: float, radius: float) -> tuple[list[bool], list[float]]:
+def _opened_gap_mask(
+    chm: Grid,
+    threshold: float,
+    radius: float,
+    *,
+    walls: Walls | None = None,
+    cells: list[float] | None = None,
+) -> tuple[list[bool], list[float]]:
     """Sub-canopy cells covered by an opening of at least ``radius``.
 
     Returns:
         The opened mask and the distance-to-boundary values behind it.
     """
-    distances = _canopy_distance_field(chm, threshold)
-    radii = opening_radius_field(chm, threshold=threshold)
+    if walls is None:
+        walls = Walls(_blocked(chm, threshold), chm.nrows, chm.ncols)
+    if cells is None:
+        cells = distance_field(walls.blocked, chm.nrows, chm.ncols)
+    distances = [value * chm.cellsize for value in cells]
+    # Circles that cannot reach the requested radius never cross the
+    # threshold, so the search for them is skipped; the mask is identical to
+    # thresholding the full field.
+    radii = _opening_values(
+        chm, threshold, at_least=radius / chm.cellsize, walls=walls, cells=cells
+    )
+    # Equality against the requested radius has to absorb the last digit of a
+    # square root.  The tolerance is a fraction of a cell, not a fixed number
+    # of metres: an absolute ``1e-9`` is invisible on a 1 m raster but swamps
+    # a raster whose cells are nanometres wide, where it admitted every cell
+    # regardless of radius.  The comparison is made in cell units, where the
+    # field is computed, so the same cells pass at every cell size.
+    wanted = radius / chm.cellsize
     mask = [
-        value is not None and value < threshold and radii[position] >= radius - 1e-9
+        value is not None and value < threshold and radii[position] >= wanted - 1e-9
         for position, value in enumerate(chm.values)
     ]
     return mask, distances
 
 
-def _components_reaching_border(chm: Grid, threshold: float) -> list[bool]:
+def _components_reaching_border(chm: Grid, threshold: float, connectivity: int = 8) -> list[bool]:
     """Flag every sub-canopy cell whose untrimmed component touches the border.
 
     Computed on the raw threshold mask, before any morphological trimming, so
     the answer describes the opening on the ground rather than what survived
-    the erosion.
+    the erosion.  ``connectivity`` must match the connectivity the gaps
+    themselves are labelled with: under four-connectivity two openings that meet
+    only at a corner are separate gaps, and inheriting edge contact across that
+    corner would mark an interior gap as running off the plot.
     """
     reaches = [False] * len(chm.values)
     seen = [False] * len(chm.values)
@@ -284,7 +280,7 @@ def _components_reaching_border(chm: Grid, threshold: float) -> list[bool]:
             r, c = queue.popleft()
             if r in (0, chm.nrows - 1) or c in (0, chm.ncols - 1):
                 touches = True
-            for nrow, ncol in chm.neighbors(r, c, connectivity=8):
+            for nrow, ncol in chm.neighbors(r, c, connectivity=connectivity):
                 index = nrow * chm.ncols + ncol
                 if seen[index]:
                     continue
@@ -336,11 +332,12 @@ def find_gaps(
     if min_width < 0:
         raise GridError("min_width must be non-negative")
 
+    walls = Walls(_blocked(chm, threshold), chm.nrows, chm.ncols)
+    cells = distance_field(walls.blocked, chm.nrows, chm.ncols)
     if min_width > 0:
-        mask, to_canopy = _opened_gap_mask(chm, threshold, min_width / 2.0)
+        mask, _ = _opened_gap_mask(chm, threshold, min_width / 2.0, walls=walls, cells=cells)
     else:
         mask = [value is not None and value < threshold for value in chm.values]
-        to_canopy = _canopy_distance_field(chm, threshold)
 
     # Morphological opening insets the mask from the border, so a gap that
     # genuinely runs off the plot keeps no cell *on* the border.  Proximity to
@@ -348,7 +345,7 @@ def find_gaps(
     # the edge by a single row of trees is just as close.  Ask the untrimmed
     # sub-canopy area instead: this gap continues past the extent exactly when
     # the raw opening it was carved from reaches the border.
-    reaches_border = _components_reaching_border(chm, threshold)
+    reaches_border = _components_reaching_border(chm, threshold, connectivity)
 
     seen = [False] * len(chm.values)
     gaps: list[CanopyGap] = []
@@ -379,16 +376,19 @@ def find_gaps(
         touches_edge = any(reaches_border[r * chm.ncols + c] for r, c in members)
         if touches_edge and not include_edge_gaps:
             continue
-        inscribed = max(to_canopy[r * chm.ncols + c] for r, c in members)
+        # The largest circle that fits inside the open ground with its centre
+        # in this gap's cells, found exactly rather than read off cell centres.
+        circle = inscribed_circle(walls, cells, [r * chm.ncols + c for r, c in members])
+        inscribed = circle.radius * chm.cellsize
         xs, ys = zip(*(chm.cell_center(r, c) for r, c in members), strict=True)
         gaps.append(
             CanopyGap(
                 gap_id=next_id,
                 cells=tuple(members),
                 area=area,
-                centroid_x=sum(xs) / len(xs),
-                centroid_y=sum(ys) / len(ys),
-                mean_height=sum(heights) / len(heights),
+                centroid_x=mean_of(xs),
+                centroid_y=mean_of(ys),
+                mean_height=mean_of(heights),
                 max_height=max(heights),
                 touches_edge=touches_edge,
                 inscribed_radius=inscribed,
@@ -413,8 +413,24 @@ def find_gaps(
 
 
 def gap_fraction(chm: Grid, *, threshold: float = 2.0) -> float:
-    """Fraction of the canopy below ``threshold`` — the complement of cover."""
-    return 1.0 - canopy_cover(chm, threshold)
+    """Fraction of valid cells below ``threshold``.
+
+    Counted from the open cells directly rather than as ``1 - cover``.  The two
+    are the same number in arithmetic but not in floating point: three open
+    cells in ten are exactly ``0.3`` counted, and ``0.30000000000000004`` taken
+    as one minus seven tenths.  Rules phrased as *above* a limit are read
+    strictly, so that last bit decided whether a plot sitting exactly on a
+    30 % limit was reported as breaching it.
+    """
+    total = 0
+    open_cells = 0
+    for _, _, height in chm.valid_cells():
+        total += 1
+        if height < threshold:
+            open_cells += 1
+    if total == 0:
+        return 0.0
+    return open_cells / total
 
 
 def rugosity(chm: Grid, *, threshold: float = 0.0) -> float:
@@ -426,8 +442,7 @@ def rugosity(chm: Grid, *, threshold: float = 0.0) -> float:
     heights = [h for _, _, h in chm.valid_cells() if h > threshold]
     if len(heights) < 2:
         return 0.0
-    mean = sum(heights) / len(heights)
-    return math.sqrt(sum((h - mean) ** 2 for h in heights) / (len(heights) - 1))
+    return stdev_of(heights)
 
 
 def vertical_strata(chm: Grid, breaks: tuple[float, ...] = STRATA_BREAKS) -> dict[str, float]:

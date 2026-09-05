@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import math
+import sys
+
 import pytest
 
 from silvispect.detect import Crown, TreeTop
 from silvispect.inventory import (
+    MAX_DBH_CM,
     InventoryError,
     Plot,
     Tree,
@@ -170,9 +175,11 @@ def test_matching_skips_dead_trees_by_default():
 
 def test_matching_with_no_data_is_empty():
     match = match_trees([], [])
-    assert match.recall == 0.0
-    assert match.precision == 0.0
-    assert match.f1 == 0.0
+    # Recall, precision and F1 each have their own empty denominator here, so
+    # every one of them is undefined rather than zero.
+    assert match.recall is None
+    assert match.precision is None
+    assert match.f1 is None
     assert match.height_bias is None
     assert match.height_rmse is None
     assert match.mean_offset is None
@@ -186,3 +193,351 @@ def test_matching_rejects_bad_tolerance():
 def test_shift_trees():
     moved = shift_trees([Tree("a", 1.0, 2.0)], 10.0, -1.0)
     assert (moved[0].x, moved[0].y) == (11.0, 1.0)
+
+
+def test_matching_is_independent_of_record_order():
+    """Equal distances must not let CSV row order decide the match count."""
+    crowns = [crown(1, 0.0, 0.0, 10.0), crown(2, 2.0, 0.0, 20.0)]
+    a = Tree("A", 1.0, 0.0, height_m=11.0)
+    b = Tree("B", 0.0, 1.0, height_m=31.0)
+    forward = match_trees(crowns, [a, b], tolerance=1.01)
+    backward = match_trees(crowns, [b, a], tolerance=1.01)
+    assert forward.as_dict() == backward.as_dict()
+
+
+def test_matching_is_permutation_invariant_over_many_shuffles():
+    import random
+
+    rng = random.Random(4)
+    crowns = [crown(i, float(i % 5), float(i // 5), 20.0) for i in range(1, 16)]
+    trees = [Tree(f"f{i}", float(i % 5) + 0.2, float(i // 5), height_m=20.0) for i in range(15)]
+    baseline = match_trees(crowns, trees).as_dict()
+    for _ in range(25):
+        shuffled = trees[:]
+        rng.shuffle(shuffled)
+        assert match_trees(crowns, shuffled).as_dict() == baseline
+
+
+def _rigid_transforms():
+    """Isometries of the plane that a stand's geometry must be indifferent to."""
+    return {
+        "identity": lambda x, y: (x, y),
+        "rotate_180": lambda x, y: (-x, -y),
+        "rotate_90": lambda x, y: (-y, x),
+        "reflect_x": lambda x, y: (-x, y),
+        "transpose": lambda x, y: (y, x),
+        "translate": lambda x, y: (x + 137.5, y - 4021.25),
+    }
+
+
+def test_matching_is_invariant_under_rigid_motion():
+    """Matching describes a forest, not a coordinate frame.
+
+    Breaking equal-distance ties on position merely traded a dependence on CSV
+    row order for a dependence on which way the plot happened to be oriented:
+    the same two crowns and two stems, all exactly one metre apart, matched one
+    pair in one frame and two after rotating the whole scene.  How many pairs a
+    tie yields is a property of the geometry, so every isometry must agree.
+    """
+    import random
+
+    rng = random.Random(2026)
+    for trial in range(60):
+        count = rng.randint(2, 7)
+        # Place stems on a lattice and crowns exactly one metre away in a random
+        # direction, which manufactures ties in bulk.
+        stems = [(float(rng.randint(0, 4)), float(rng.randint(0, 4))) for _ in range(count)]
+        tops = [
+            (x + rng.choice([-1.0, 1.0, 0.0]), y + rng.choice([0.0, -1.0, 1.0])) for x, y in stems
+        ]
+        baseline = None
+        for name, move in _rigid_transforms().items():
+            crowns = [crown(i + 1, *move(x, y), 20.0 + i) for i, (x, y) in enumerate(tops)]
+            trees = [
+                Tree(f"S{i:02d}", *move(x, y), height_m=20.0 + i) for i, (x, y) in enumerate(stems)
+            ]
+            result = match_trees(crowns, trees, tolerance=1.01)
+            summary = (len(result.matches), len(result.omissions), len(result.commissions))
+            if baseline is None:
+                baseline = summary
+            assert summary == baseline, f"trial {trial}: {name} disagreed with identity"
+
+
+def test_matching_never_gives_up_a_nearer_pair():
+    """Resolving ties must not reroute a pair that no tie was involved in."""
+    crowns = [crown(1, 0.0, 0.0, 20.0), crown(2, 1.0, 0.0, 20.0)]
+    trees = [Tree("A", 0.1, 0.0, height_m=20.0), Tree("B", 2.0, 0.0, height_m=20.0)]
+    result = match_trees(crowns, trees, tolerance=1.5)
+    paired = {c.tree_id: t.tree_id for c, t, _ in result.matches}
+    assert paired == {1: "A", 2: "B"}
+
+
+def test_matching_pairs_as_many_ties_as_the_geometry_allows():
+    """Two crowns and two stems mutually one metre apart admit two pairs."""
+    crowns = [crown(1, 0.0, 0.0, 10.0), crown(2, 2.0, 0.0, 20.0)]
+    trees = [Tree("A", 1.0, 0.0, height_m=11.0), Tree("B", 0.0, 1.0, height_m=31.0)]
+    assert len(match_trees(crowns, trees, tolerance=1.01).matches) == 2
+
+
+def test_matching_count_does_not_depend_on_who_the_stems_are():
+    """Relabelling two stems cannot change how many crowns get matched.
+
+    Two stems sit a metre either side of one crown; a second crown is two
+    metres from the left-hand stem and out of reach of the right-hand one.
+    The nearest distance can be honoured either way, but only one of those ways
+    leaves a partner for the second crown.  Settling each distance on its own
+    and never looking further picked by identifier, so swapping the two labels
+    — the same forest, the same geometry — moved the match count from one to
+    two.
+    """
+    crowns = [crown(1, 0.0, 0.0, 20.0), crown(2, -3.0, 0.0, 20.0)]
+    counts = set()
+    for left, right in (("A", "B"), ("B", "A")):
+        trees = [Tree(left, -1.0, 0.0, height_m=20.0), Tree(right, 1.0, 0.0, height_m=20.0)]
+        result = match_trees(crowns, trees, tolerance=2.5)
+        counts.add(len(result.matches))
+        assert sorted(round(d, 6) for _, _, d in result.matches) == [1.0, 2.0]
+    assert counts == {2}
+
+
+def _best_distance_profile(crowns, trees, tolerance):
+    """Exhaustive optimum: the largest per-distance count vector, lexicographic."""
+    import itertools
+
+    edges = [
+        (i, j, math.hypot(c.x - t.x, c.y - t.y))
+        for i, c in enumerate(crowns)
+        for j, t in enumerate(trees)
+        if math.hypot(c.x - t.x, c.y - t.y) <= tolerance
+    ]
+    tiers = sorted({distance for _, _, distance in edges})
+    rank = {distance: index for index, distance in enumerate(tiers)}
+    best = tuple([0] * len(tiers))
+    for size in range(len(crowns) + 1):
+        for combination in itertools.combinations(range(len(edges)), size):
+            used_crowns: set[int] = set()
+            used_trees: set[int] = set()
+            profile = [0] * len(tiers)
+            for edge in combination:
+                i, j, distance = edges[edge]
+                if i in used_crowns or j in used_trees:
+                    break
+                used_crowns.add(i)
+                used_trees.add(j)
+                profile[rank[distance]] += 1
+            else:
+                best = max(best, tuple(profile))
+    return best
+
+
+def _profile(result, tolerance, crowns, trees):
+    tiers = sorted(
+        {
+            math.hypot(c.x - t.x, c.y - t.y)
+            for c in crowns
+            for t in trees
+            if math.hypot(c.x - t.x, c.y - t.y) <= tolerance
+        }
+    )
+    rank = {distance: index for index, distance in enumerate(tiers)}
+    profile = [0] * len(tiers)
+    for _, _, distance in result.matches:
+        profile[rank[distance]] += 1
+    return tuple(profile)
+
+
+def test_matching_reaches_the_exhaustive_optimum():
+    """The stated objective, checked against every possible pairing.
+
+    Honour as many pairs as possible at the shortest distance, then as many as
+    possible at the next without giving any of those up, and so on.  Checked
+    here against brute-force enumeration of every partial pairing, because a
+    rule about ties is only worth as much as the cases nobody thought of.
+    """
+    import random
+
+    rng = random.Random(20260819)
+    for _ in range(300):
+        count_c, count_t = rng.randint(1, 4), rng.randint(1, 4)
+        crowns = [
+            crown(i + 1, float(rng.randint(-3, 3)), float(rng.randint(-3, 3)), 20.0)
+            for i in range(count_c)
+        ]
+        trees = [
+            Tree(f"S{j}", float(rng.randint(-3, 3)), float(rng.randint(-3, 3)), height_m=20.0)
+            for j in range(count_t)
+        ]
+        tolerance = rng.choice([1.0, 2.0, 2.5, 3.0])
+        result = match_trees(crowns, trees, tolerance=tolerance)
+        assert _profile(result, tolerance, crowns, trees) == _best_distance_profile(
+            crowns, trees, tolerance
+        )
+
+
+def test_matching_count_survives_relabelling_and_reordering():
+    """Neither the names on the stems nor the order of the rows may matter."""
+    import random
+
+    rng = random.Random(11)
+    for _ in range(120):
+        crowns = [
+            crown(i + 1, float(rng.randint(-4, 4)), float(rng.randint(-4, 4)), 20.0 + i * 0.1)
+            for i in range(rng.randint(2, 5))
+        ]
+        places = [(float(rng.randint(-4, 4)), float(rng.randint(-4, 4))) for _ in range(4)]
+        heights = [20.0 + rng.random() for _ in places]
+        names = [f"S{j}" for j in range(len(places))]
+
+        def build(labels, order):
+            return [
+                Tree(labels[j], *places[j], height_m=heights[j])  # noqa: B023
+                for j in order
+            ]
+
+        def summary(trees, crowns=crowns):
+            outcome = match_trees(crowns, trees, tolerance=2.5)
+            return (len(outcome.matches), len(outcome.omissions), len(outcome.commissions))
+
+        baseline = summary(build(names, list(range(len(places)))))
+
+        shuffled_rows = list(range(len(places)))
+        rng.shuffle(shuffled_rows)
+        assert summary(build(names, shuffled_rows)) == baseline
+
+        relabelled = names[:]
+        rng.shuffle(relabelled)
+        assert summary(build(relabelled, list(range(len(places))))) == baseline
+
+
+def test_matching_never_trades_a_nearer_pair_for_more_farther_ones():
+    """One pair at half a metre outranks two at two metres."""
+    crowns = [crown(1, 0.0, 0.0, 20.0)]
+    trees = [
+        Tree("near", 0.5, 0.0, height_m=20.0),
+        Tree("far", 2.0, 0.0, height_m=20.0),
+    ]
+    result = match_trees(crowns, trees, tolerance=2.5)
+    assert [t.tree_id for _, t, _ in result.matches] == ["near"]
+
+    # Two crowns competing for one near stem: the nearer claim wins and the
+    # other crown falls back to its own second-choice stem rather than
+    # displacing it.
+    crowns = [crown(1, 0.0, 0.0, 20.0), crown(2, 1.0, 0.0, 20.0)]
+    trees = [Tree("a", 0.1, 0.0, height_m=20.0), Tree("b", 2.0, 0.0, height_m=20.0)]
+    paired = {c.tree_id: t.tree_id for c, t, _ in match_trees(crowns, trees, tolerance=2.5).matches}
+    assert paired == {1: "a", 2: "b"}
+
+
+def test_matching_resolves_independent_tie_clusters_together():
+    """Several tied clusters in one plot are each settled on their own merits."""
+    crowns = []
+    trees = []
+    for cluster in range(3):
+        offset = cluster * 100.0
+        crowns.append(crown(2 * cluster + 1, offset + 0.0, 0.0, 20.0))
+        crowns.append(crown(2 * cluster + 2, offset - 3.0, 0.0, 20.0))
+        trees.append(Tree(f"L{cluster}", offset - 1.0, 0.0, height_m=20.0))
+        trees.append(Tree(f"R{cluster}", offset + 1.0, 0.0, height_m=20.0))
+    result = match_trees(crowns, trees, tolerance=2.5)
+    assert len(result.matches) == 6
+    assert sorted(round(d, 6) for _, _, d in result.matches) == [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]
+
+
+def test_inventory_csv_is_a_quantised_record():
+    """CSV output rounds to ``precision`` decimals, and that is the contract.
+
+    An inventory is a record of measurements, so it is written at the
+    resolution a field instrument reports rather than at the resolution a float
+    happens to hold.  The consequence is real and documented in
+    ``docs/data-formats.md``: a stem four ten-thousandths outside a tolerance
+    is inside it after a round trip.  Raising ``precision`` is the way out, and
+    it has to keep working.
+    """
+    tree = Tree("A", 2.5004, 0.0, height_m=20.0)
+    assert parse_trees(trees_to_csv([tree]))[0].x == 2.5
+    assert parse_trees(trees_to_csv([tree], precision=6))[0].x == 2.5004
+
+    crowns = [crown(1, 0.0, 0.0, 20.0)]
+    assert len(match_trees(crowns, [tree], tolerance=2.5).matches) == 0
+    rounded = parse_trees(trees_to_csv([tree]))
+    assert len(match_trees(crowns, rounded, tolerance=2.5).matches) == 1
+    kept = parse_trees(trees_to_csv([tree], precision=6))
+    assert len(match_trees(crowns, kept, tolerance=2.5).matches) == 0
+
+
+def test_an_undefined_ratio_is_not_a_bad_one():
+    """Precision and recall each have their own denominator.
+
+    Detecting nothing over an empty reference divided zero by zero three times
+    and called the answer 0.0, which the agreement rules then read as complete
+    failure — a warning about a comparison that had not happened.  A ratio with
+    no denominator is unknown, and unknown is not low.
+    """
+    empty = match_trees([], [])
+    assert (empty.recall, empty.precision, empty.f1) == (None, None, None)
+
+    crown = Crown(
+        tree_id=1,
+        apex=TreeTop(1, 0, 0, 1.0, 1.0, 20.0),
+        cells=((0, 0),),
+        area=1.0,
+        mean_height=20.0,
+        max_extent=0.0,
+    )
+    no_reference = match_trees([crown], [])
+    assert no_reference.recall is None
+    assert no_reference.precision == 0.0
+
+    no_detection = match_trees([], [Tree(tree_id="a", x=1.0, y=1.0, height_m=20.0)])
+    assert no_detection.recall == 0.0
+    assert no_detection.precision is None
+
+    payload = no_detection.as_dict()
+    assert payload["precision"] is None and payload["recall"] == 0.0
+    assert json.loads(json.dumps(payload, allow_nan=False))["precision"] is None
+
+
+def test_two_headings_for_one_field_are_refused():
+    """``x`` and ``easting`` are the same column under two names.
+
+    Folding the row into a dictionary kept whichever came last, so a file
+    headed ``x,easting,y`` reported the easting as the x of every stem and
+    said nothing at all about the column it had thrown away.
+    """
+    with pytest.raises(InventoryError, match="same field"):
+        parse_trees("x,easting,y\n1,999,2\n")
+    with pytest.raises(InventoryError, match="same field"):
+        parse_trees("x,y,dbh,dbh_cm\n1,2,30,40\n")
+    with pytest.raises(InventoryError, match="same field"):
+        parse_trees("x,y,X\n1,2,3\n")
+
+    # Distinct fields that merely share a prefix are still fine.
+    assert len(parse_trees("x,y,dbh_cm,height_m\n1,2,30,20\n")) == 1
+
+
+def test_a_row_with_more_fields_than_columns_is_refused():
+    """A value no column claims is data being dropped on the floor."""
+    with pytest.raises(InventoryError, match="fields for"):
+        parse_trees("x,y\n1,2,7\n")
+    # A trailing separator adds only blanks, and loses nothing.
+    assert len(parse_trees("x,y\n1,2,\n")) == 1
+    # Short rows stay tolerated: a missing optional value is not a dropped one.
+    assert parse_trees("x,y,dbh_cm\n1,2\n")[0].dbh_cm is None
+
+
+def test_a_stem_must_be_summarisable_to_be_accepted():
+    """Every accepted record has to survive the metrics that read it.
+
+    A diameter above ~1.5e156 has no representable basal area, so each summary
+    that reached it overflowed part-way through — after the earlier rows had
+    already been folded in.  Refusing the record keeps "accepted" and
+    "summarisable" the same set.
+    """
+    with pytest.raises(InventoryError, match="basal area"):
+        Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=1e200)
+    with pytest.raises(InventoryError, match="finite"):
+        Tree(tree_id="a", x=math.nan, y=0.0)
+    with pytest.raises(InventoryError, match="finite"):
+        Tree(tree_id="a", x=0.0, y=0.0, height_m=math.inf)
+
+    assert Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=MAX_DBH_CM).basal_area_m2 == sys.float_info.max

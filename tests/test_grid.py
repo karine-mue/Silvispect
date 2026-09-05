@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import decimal
 import math
+import sys
 
 import pytest
 
-from silvispect.grid import Grid, GridError
+from silvispect.grid import Grid, GridError, mean_of, rms_of, stdev_of, sum_of
+
+MAX = sys.float_info.max
 
 SAMPLE = """\
 ncols 3
@@ -210,3 +214,324 @@ def test_serialisation_trims_trailing_zeros():
     text = Grid.from_rows([[1.5, 2.0]]).to_text()
     assert "1.5 2" in text
     assert "NODATA_value -9999" in text
+
+
+@pytest.mark.parametrize("origin", [0.0, 1.0, 1e3, 1e6, 1e9, 1e12])
+def test_origin_tolerance_does_not_grow_with_coordinates(origin):
+    """A half-cell shift is a different raster at every easting.
+
+    The allowance for origins is a fraction of a cell, so it means the same
+    thing on a projected grid a billion metres from the false origin as it does
+    at zero.  A relative tolerance on the coordinates instead let the allowance
+    grow with them, and two rasters half a cell apart at an easting of 1e9 were
+    subtracted cell for cell into a quietly wrong canopy model.
+    """
+    reference = Grid.from_rows([[10.0]], cellsize=1.0, xllcorner=origin)
+    for shift in (0.5, 0.1, 0.01):
+        shifted = Grid.from_rows([[1.0]], cellsize=1.0, xllcorner=origin + shift)
+        with pytest.raises(GridError, match="origin"):
+            reference.assert_aligned(shifted)
+
+
+@pytest.mark.parametrize("cellsize", [1e-9, 1e-3, 1.0, 10.0, 1e6])
+def test_origin_tolerance_is_a_fraction_of_a_cell(cellsize):
+    """Rounding noise is forgiven; a visible fraction of a cell is not."""
+    reference = Grid.from_rows([[10.0]], cellsize=cellsize)
+    noisy = Grid.from_rows([[1.0]], cellsize=cellsize, xllcorner=cellsize * 1e-9)
+    reference.assert_aligned(noisy)  # must not raise
+    displaced = Grid.from_rows([[1.0]], cellsize=cellsize, xllcorner=cellsize * 0.01)
+    with pytest.raises(GridError, match="origin"):
+        reference.assert_aligned(displaced)
+
+
+def test_window_yields_exactly_the_in_bounds_offsets():
+    """Clipping the walk must not change which cells come back, or their order."""
+    import random
+
+    def unclipped(grid, row, col, radius, circular):
+        out = []
+        for drow in range(-radius, radius + 1):
+            for dcol in range(-radius, radius + 1):
+                if circular and drow * drow + dcol * dcol > radius * radius:
+                    continue
+                if grid.in_bounds(row + drow, col + dcol):
+                    out.append((row + drow, col + dcol))
+        return out
+
+    rng = random.Random(4242)
+    for _ in range(400):
+        grid = Grid.filled(rng.randint(1, 7), rng.randint(1, 7), 0.0)
+        row, col = rng.randrange(grid.nrows), rng.randrange(grid.ncols)
+        radius, circular = rng.randint(0, 9), rng.random() < 0.5
+        assert list(grid.window(row, col, radius, circular=circular)) == unclipped(
+            grid, row, col, radius, circular
+        )
+
+
+def test_window_cost_follows_the_raster_not_the_requested_radius():
+    """A one-cell raster is one cell of work however wide the window asks to be.
+
+    The detector sizes its search window from the height of the cell it is
+    testing, so an accepted — if implausible — height buys an enormous radius.
+    Walking the whole requested square made a single-cell raster quadratic in a
+    number that describes nothing about it: at 1e5 m the search took sixteen
+    seconds to look at one cell.
+    """
+    import time
+
+    grid = Grid.filled(1, 1, 5.0)
+    for radius in (16, 1024, 1_000_000):
+        assert list(grid.window(0, 0, radius, circular=True)) == [(0, 0)]
+
+    def elapsed(radius: int) -> float:
+        start = time.perf_counter()
+        for _ in range(200):
+            list(grid.window(0, 0, radius, circular=True))
+        return time.perf_counter() - start
+
+    small = max(elapsed(16), 1e-6)
+    assert elapsed(4096) / small < 20.0
+
+
+@pytest.mark.parametrize("sentinel", [0.0, -9999.0, 1e300, -1e-300])
+def test_only_the_sentinel_itself_reads_back_as_absent(sentinel):
+    """Absence is an exact value, not a neighbourhood.
+
+    Treating nearby numbers as absent deleted measurements the document had
+    written out in full — with a sentinel of ``0`` the smallest positive float
+    a raster can hold vanished — and the band of swallowed values widened with
+    the magnitude of the sentinel.
+    """
+    neighbour = math.nextafter(sentinel, math.inf)
+    grid = Grid.from_rows([[neighbour, 1.0]], nodata_value=sentinel)
+    assert Grid.parse(grid.to_text(precision=None)).values == [neighbour, 1.0]
+
+    absent = Grid.from_rows([[None, 1.0]], nodata_value=sentinel)
+    assert Grid.parse(absent.to_text(precision=None)).values == [None, 1.0]
+
+
+def test_statistics_stay_finite_for_accepted_finite_values():
+    """Every value a raster accepts must survive being described.
+
+    A raster holding 0 and 1e200 is finite and is read, written and analysed
+    without complaint, but squaring the deviations overflowed — after the
+    command had already written its output — and the run reported failure over
+    a number nobody had asked for.
+    """
+    stats = Grid.from_rows([[0.0, 1e200]]).stats()
+    assert stats.mean == pytest.approx(5e199)
+    assert math.isfinite(stats.stdev) and stats.stdev > 0.0
+
+    extreme = Grid.from_rows([[-1e308, 1e308]]).stats()
+    assert extreme.mean == pytest.approx(0.0, abs=1.0)
+    assert math.isfinite(extreme.stdev)
+
+    for value in (1e308, 1e-308):
+        pair = Grid.from_rows([[value, value]]).stats()
+        assert math.isfinite(pair.mean) and pair.stdev == 0.0
+
+
+@pytest.mark.parametrize("header", ["ncols 1.9\nnrows 1\n", "ncols 1\nnrows 2.5\n"])
+def test_fractional_dimensions_are_malformed(header):
+    """A raster has a whole number of cells, so 1.9 columns is bad input."""
+    with pytest.raises(GridError, match="whole number"):
+        Grid.parse(header + "cellsize 1\n0\n")
+    assert Grid.parse("ncols 2\nnrows 1\ncellsize 1\n0 1\n").ncols == 2
+
+
+def _oracle(values):
+    """Mean and sample standard deviation computed far outside float range."""
+    with decimal.localcontext() as ctx:
+        ctx.prec = 400
+        exact = [decimal.Decimal(value) for value in values]
+        mean = sum(exact) / len(exact)
+        if len(exact) < 2:
+            return mean, decimal.Decimal(0)
+        variance = sum((value - mean) ** 2 for value in exact) / (len(exact) - 1)
+        return mean, variance.sqrt()
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [MAX, MAX, MAX],
+        [-MAX, MAX, MAX, MAX],
+        [MAX / 4, -MAX / 4],
+        [MAX / 2, MAX / 2, -MAX / 2],
+        [1e308, 1e-308, 5.0],
+        [0.0, 1e200],
+        [5e-324, 1e-320, 3e-320],
+        [-3.0, -3.0, -3.0],
+        [7.5],
+    ],
+)
+def test_statistics_match_an_independent_high_precision_oracle(values):
+    """A statistic a raster's own values can express must come out exactly.
+
+    Every list here is made of values the raster accepts and has a mean and a
+    deviation inside the finite range, so there is a right answer to give.
+    Adding before dividing reached the limit part-way through three copies of
+    the largest float and raised, and subtracting a mean of the same size from
+    ``-MAX`` produced ``NaN`` — both for statistics a Decimal at 120 digits
+    prints without difficulty.
+
+    The oracle runs at 400 significant digits: the largest float needs 309 of
+    them, so a shorter context rounds the reference itself and invents a
+    deviation where the true one is zero.
+    """
+    stats = Grid.from_rows([values], cellsize=1.0).stats()
+    mean, stdev = _oracle(values)
+    assert math.isfinite(stats.mean) and math.isfinite(stats.stdev)
+    assert stats.mean == pytest.approx(float(mean), rel=1e-12, abs=1e-320)
+    assert stats.stdev == pytest.approx(float(stdev), rel=1e-12, abs=1e-320)
+
+
+def test_reductions_scale_before_they_sum():
+    """The shared helpers are the reason the statistics survive, so test them.
+
+    ``sum`` reaches the finite limit on a running total whose answer is
+    representable, and squaring reaches it for any value past about 1.3e154.
+    """
+    assert mean_of([MAX, MAX, MAX]) == MAX
+    assert stdev_of([MAX, MAX, MAX]) == 0.0
+    assert sum_of([MAX, MAX, -MAX]) == MAX
+    assert sum_of([]) == 0.0
+    assert rms_of([3.0, 4.0]) == pytest.approx(math.sqrt(12.5))
+    assert rms_of([1e200, 1e200]) == pytest.approx(1e200)
+    assert math.isfinite(rms_of([MAX, MAX]))
+    with pytest.raises(GridError):
+        mean_of([])
+
+
+def test_smoothing_a_saturated_raster_stays_finite():
+    """Smoothing runs before anything else in detection, so it cannot overflow.
+
+    The mean filter summed its window and divided afterwards.  Two cells at the
+    largest finite float made that sum infinite, and detection then tried to
+    turn an infinite search radius into a whole number of cells.
+    """
+    smoothed = Grid.from_rows([[MAX, MAX], [MAX, MAX]], cellsize=1.0).smooth_mean(1)
+    assert all(value == MAX for value in smoothed.values)
+
+
+def test_alignment_does_not_depend_on_which_grid_is_asked():
+    """``a`` lines up with ``b`` exactly when ``b`` lines up with ``a``.
+
+    The origin tolerance is a fraction of a cell, and cellsizes only have to
+    agree to a relative 1e-9.  Reading that fraction off the receiver alone
+    left a band in which ``a.combine(b)`` refused the pair that
+    ``b.combine(a)`` accepted, so whether two rasters could be subtracted
+    depended on the order they were written in.
+    """
+    a = Grid.filled(1, 1, 1.0, cellsize=1.0)
+    b = Grid.filled(1, 1, 2.0, cellsize=1.0 + 2**-33)
+    b.xllcorner = 1.00000000005e-06
+    with pytest.raises(GridError):
+        a.assert_aligned(b)
+    with pytest.raises(GridError):
+        b.assert_aligned(a)
+
+    same = Grid.filled(1, 1, 3.0, cellsize=1.0)
+    same.xllcorner = 1e-9
+    a.assert_aligned(same)
+    same.assert_aligned(a)
+
+
+@pytest.mark.parametrize("origin", [0.0, 1e6, 1e9])
+def test_symmetric_tolerance_still_does_not_grow_with_coordinates(origin):
+    """The pair-wise tolerance must not reintroduce a magnitude-relative one."""
+    a = Grid.filled(1, 1, 1.0, cellsize=1.0)
+    b = Grid.filled(1, 1, 1.0, cellsize=1.0)
+    a.xllcorner = origin
+    b.xllcorner = origin + 0.5
+    with pytest.raises(GridError):
+        a.assert_aligned(b)
+    with pytest.raises(GridError):
+        b.assert_aligned(a)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "ncols 5\nnrows 1\nncols 1\ncellsize 1\n",
+        "ncols 5\nnrows 1\ncellsize 1\ncellsize 2\n",
+        "ncols 5\nnrows 1\ncellsize 1\nNODATA_value -9999\nnodata_value -1\n",
+    ],
+)
+def test_a_repeated_header_field_is_malformed(header):
+    """Two answers to one question is bad input, not a correction.
+
+    Keeping the last silently discarded the first: ``ncols 5`` followed by
+    ``ncols 1`` read a one-column raster out of a five-value body and reported
+    no problem at all.
+    """
+    with pytest.raises(GridError, match="more than once"):
+        Grid.parse(header + "1 2 3 4 5\n")
+    assert Grid.parse("ncols 5\nnrows 1\ncellsize 1\n1 2 3 4 5\n").ncols == 5
+
+
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_corner_and_centre_origins_cannot_both_be_given(axis):
+    """The two spellings of the origin differ by half a cell.
+
+    Preferring the corner threw away whichever of the two the writer had
+    actually measured, and moved the raster half a cell without saying so.
+    """
+    header = f"ncols 1\nnrows 1\ncellsize 2\n{axis}llcorner 10\n{axis}llcenter 10\n"
+    with pytest.raises(GridError, match="both"):
+        Grid.parse(header + "1\n")
+    centred = Grid.parse(f"ncols 1\nnrows 1\ncellsize 2\n{axis}llcenter 10\n1\n")
+    assert getattr(centred, f"{axis}llcorner") == 9.0
+
+
+@pytest.mark.parametrize("field", ["cellsize", "xllcorner", "yllcorner", "nodata_value"])
+@pytest.mark.parametrize("bad", [math.inf, -math.inf, math.nan])
+def test_grid_geometry_is_held_to_the_same_standard_as_its_cells(field, bad):
+    """A raster the reader would refuse is refused at construction.
+
+    Cells were checked; the header was not.  A canopy model derived from two
+    grids with a cell size of ``inf`` came back with finite heights and an
+    infinite cell, was written out, and was then refused by ``parse`` — which
+    has always demanded finite header numbers.  Every public constructor now
+    agrees with it.
+    """
+    with pytest.raises(GridError, match="finite"):
+        Grid.from_rows([[5.0]], **{field: bad})
+    with pytest.raises(GridError, match="finite"):
+        Grid.filled(1, 1, 5.0, **{field: bad})
+    keywords = {"ncols": 1, "nrows": 1, "xllcorner": 0.0, "yllcorner": 0.0, "cellsize": 1.0}
+    keywords[field] = bad
+    with pytest.raises(GridError, match="finite"):
+        Grid(**keywords, values=[5.0])
+
+
+def test_a_grid_that_can_be_built_can_be_written_and_read_back():
+    """The round trip is the contract every constructor is now measured by."""
+    from silvispect.canopy import canopy_height_model
+
+    dsm = Grid.from_rows(
+        [[5.0, 6.0]], cellsize=0.25, xllcorner=1e6, yllcorner=-2.5, nodata_value=-1
+    )
+    dtm = Grid.from_rows(
+        [[1.0, None]], cellsize=0.25, xllcorner=1e6, yllcorner=-2.5, nodata_value=-1
+    )
+    chm = canopy_height_model(dsm, dtm)
+    again = Grid.parse(chm.to_text(precision=None))
+    assert again.values == chm.values == [4.0, None]
+    assert (again.cellsize, again.xllcorner, again.yllcorner, again.nodata_value) == (
+        chm.cellsize,
+        chm.xllcorner,
+        chm.yllcorner,
+        chm.nodata_value,
+    )
+
+
+def test_grid_dimensions_are_whole_numbers():
+    """A whole-valued float is a count and is stored as one; a fraction is not."""
+    grid = Grid(ncols=2.0, nrows=1.0, xllcorner=0.0, yllcorner=0.0, cellsize=1.0, values=[1.0, 2.0])
+    assert (grid.ncols, grid.nrows) == (2, 1)
+    assert isinstance(grid.ncols, int) and isinstance(grid.nrows, int)
+    with pytest.raises(GridError, match="whole number"):
+        Grid(ncols=2, nrows=1.5, xllcorner=0.0, yllcorner=0.0, cellsize=1.0)
+    with pytest.raises(GridError):
+        Grid(ncols=True, nrows=1, xllcorner=0.0, yllcorner=0.0, cellsize=1.0)

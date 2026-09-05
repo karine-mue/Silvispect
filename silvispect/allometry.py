@@ -158,20 +158,40 @@ class FittedModel:
     def invert(self, height_m: float, *, lower: float = 0.1, upper: float = 400.0) -> float | None:
         """Back out the diameter implied by a height, or ``None`` if outside range.
 
-        The supported families are monotonically increasing in diameter, so a
-        bisection is both sufficient and robust.
+        The range is closed: a height the curve attains at ``lower`` or
+        ``upper`` inverts to that bound.
+
+        The supported families are monotone in diameter, so a bisection is both
+        sufficient and robust.  Monotone, not necessarily *increasing*: least
+        squares is free to return a decreasing curve when the data is
+        decreasing, and it does — six stems whose height halves as the diameter
+        doubles fit a power model at ``b = -1``.  Assuming the increasing
+        direction turned every such inversion into ``None``, so a curve the
+        fitter had just returned could not be read backwards at all.  Which way
+        the curve runs is read off its own endpoints instead.
         """
         try:
             low_value = self.predict(lower)
             high_value = self.predict(upper)
         except ValueError:  # pragma: no cover - guarded by fit validation
             return None
-        if height_m <= low_value or height_m >= high_value:
+        # A height the curve reaches exactly at an endpoint is in range, and
+        # the endpoint is its answer.  Excluding both ends turned
+        # ``invert(predict(lower), lower=lower)`` — the height the curve has at
+        # the very bottom of the search — into "outside the range", which is
+        # the one thing it demonstrably is not.
+        if height_m == low_value:
+            return lower
+        if height_m == high_value:
+            return upper
+        rising = high_value >= low_value
+        floor, ceiling = (low_value, high_value) if rising else (high_value, low_value)
+        if height_m < floor or height_m > ceiling:
             return None
         low, high = lower, upper
         for _ in range(200):
             mid = (low + high) / 2.0
-            if self.predict(mid) < height_m:
+            if (self.predict(mid) < height_m) is rising:
                 low = mid
             else:
                 high = mid
@@ -237,7 +257,11 @@ def fit_height_diameter(
         raise AllometryError(f"unknown model {model!r}; choose from {sorted(MODELS)}")
     if min_points < 1:
         raise AllometryError("min_points must be at least 1")
-    pairs = _as_pairs(data)
+    # Least squares is permutation-invariant in real arithmetic but not in
+    # floating point: a different summation order nudges the optimiser onto a
+    # slightly different path, so the same stand reported different parameters
+    # depending on the order its rows were listed in.  Fit in a canonical order.
+    pairs = sorted(_as_pairs(data))
     if not pairs:
         raise AllometryError("no paired diameter and height measurements to fit")
     if len(pairs) < min_points:
