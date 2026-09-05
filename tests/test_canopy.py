@@ -131,18 +131,24 @@ def test_synthetic_stand_has_realistic_cover(stand):
 def test_distance_to_canopy_measures_to_the_nearest_tree():
     """The distance is to the canopy's edge, as the edge of the plot already was.
 
-    Half of the step from an open cell's centre to a canopy cell's centre lies
+    Part of the step from an open cell's centre to a canopy cell's centre lies
     inside the canopy cell, so it is not clearance.  Counting it made the two
     halves of this field disagree — the plot edge below is measured to the
     extent, half a cell from the outermost centre — and a one-metre opening
     claimed a two-metre inscribed circle.
+
+    How much of that step is inside depends on which way the tree lies.
+    Straight across, the boundary is half a cell away.  Diagonally, the nearest
+    point of the cell is its *corner*, ``sqrt(2)/2`` of a cell away — taking
+    off a flat half cell there left a diagonal boundary a quarter of a cell
+    further away than it is.
     """
     chm = Grid.filled(7, 7, 0.0, cellsize=1.0)
     chm.set(3, 3, 10.0)
     distances = distance_to_canopy(chm, threshold=2.0)
     assert distances.get(3, 3) == 0.0
     assert distances.get(3, 4) == pytest.approx(0.5)
-    assert distances.get(2, 2) == pytest.approx(math.sqrt(2.0) - 0.5)
+    assert distances.get(2, 2) == pytest.approx(math.sqrt(2.0) / 2.0)
 
 
 def test_distance_to_canopy_is_bounded_by_the_plot_edge():
@@ -589,3 +595,103 @@ def test_a_canopy_height_that_cannot_be_written_is_refused_before_writing():
         Grid.from_rows([[1.0, 6.0], [1.0, 1.0]]),
     )
     assert Grid.parse(derived.to_text(precision=None)).values == derived.values
+
+
+def test_a_diagonal_boundary_is_a_corner_away_not_a_side_away():
+    """The reported case: a plus-shaped opening, walled in on the diagonals.
+
+    The centre of a plus has open cells straight across from it and canopy on
+    every diagonal, so the nearest boundary is a *corner* — ``sqrt(2)/2`` of a
+    cell, not the half cell a flat correction assumed.  It reported 1.83 m of
+    clearance where the largest circle that fits is 1.41 m across, and survived
+    a 1.6 m minimum it should have failed.
+    """
+    rows = [[9.0] * 5 for _ in range(5)]
+    for row, col in ((1, 2), (2, 1), (2, 2), (2, 3), (3, 2)):
+        rows[row][col] = 0.0
+    plot = Grid.from_rows(rows, cellsize=1.0)
+
+    gaps = find_gaps(plot, threshold=2.0, min_area=0.0, min_width=0.0)
+    assert [gap.width for gap in gaps] == [pytest.approx(math.sqrt(2.0))]
+    assert find_gaps(plot, threshold=2.0, min_area=0.0, min_width=1.6) == []
+    assert len(find_gaps(plot, threshold=2.0, min_area=0.0, min_width=1.4)) == 1
+
+
+@pytest.mark.parametrize("cellsize", [0.25, 1.0, 4.0])
+def test_openings_report_the_circle_that_fits_in_them(cellsize):
+    """One shape per adjacency: orthogonal, diagonal, corner, edge, and wider.
+
+    The expected widths are worked out from the geometry rather than read back
+    from the implementation: the largest circle inside an opening touches the
+    nearest canopy *boundary*, which is half a cell away straight across and
+    ``sqrt(2)/2`` of a cell away on the diagonal.
+    """
+    half, corner = 0.5, math.sqrt(2.0) / 2.0
+
+    def plot(rows):
+        return Grid.from_rows([[9.0 if v else 0.0 for v in row] for row in rows], cellsize=cellsize)
+
+    def width_of(rows):
+        gaps = find_gaps(plot(rows), threshold=2.0, min_area=0.0, min_width=0.0)
+        assert len(gaps) == 1
+        return gaps[0].width / cellsize
+
+    # A single cell: four orthogonal walls, so half a cell of clearance.
+    assert width_of([[1, 1, 1], [1, 0, 1], [1, 1, 1]]) == pytest.approx(2 * half)
+    # A plus: the walls it has are all diagonal.
+    assert width_of(
+        [[1, 1, 1, 1, 1], [1, 1, 0, 1, 1], [1, 0, 0, 0, 1], [1, 1, 0, 1, 1], [1, 1, 1, 1, 1]]
+    ) == pytest.approx(2 * corner)
+    # A three-by-three block: the centre is a cell and a half from the wall.
+    assert width_of(
+        [[1, 1, 1, 1, 1], [1, 0, 0, 0, 1], [1, 0, 0, 0, 1], [1, 0, 0, 0, 1], [1, 1, 1, 1, 1]]
+    ) == pytest.approx(3.0)
+    # Against the plot edge, which bounds the circle the same way.
+    assert width_of([[0, 1, 1], [1, 1, 1], [1, 1, 1]]) == pytest.approx(2 * half)
+
+
+def test_gap_width_transforms_with_the_plot():
+    """A gap is a shape on the ground, so reflecting the plot cannot resize it."""
+    rows = [[9.0] * 6 for _ in range(6)]
+    for row, col in ((1, 1), (1, 2), (2, 2), (3, 3), (3, 4), (4, 4)):
+        rows[row][col] = 0.0
+    forward = find_gaps(
+        Grid.from_rows(rows, cellsize=0.5), threshold=2.0, min_area=0.0, min_width=0.0
+    )
+    mirrored = find_gaps(
+        Grid.from_rows([row[::-1] for row in rows], cellsize=0.5),
+        threshold=2.0,
+        min_area=0.0,
+        min_width=0.0,
+    )
+    assert sorted(gap.width for gap in forward) == sorted(gap.width for gap in mirrored)
+
+
+@pytest.mark.parametrize("floor", [math.inf, -math.inf, math.nan])
+def test_a_clamp_that_is_not_a_number_is_refused(floor):
+    """The subtraction was checked; the clamp applied afterwards was not.
+
+    A floor of ``inf`` replaced every measured height with infinity, and the
+    command wrote that model out and reported success — after which its own
+    reader refused the file.
+    """
+    with pytest.raises(GridError, match="finite"):
+        canopy_height_model(Grid.from_rows([[5.0]]), Grid.from_rows([[1.0]]), floor=floor)
+    with pytest.raises(GridError, match="finite"):
+        Grid.from_rows([[5.0]]).clip(maximum=floor)
+    assert canopy_height_model(Grid.from_rows([[5.0]]), Grid.from_rows([[1.0]])).values == [4.0]
+
+
+def test_a_raster_cannot_hold_a_value_a_file_cannot():
+    """``parse`` has always refused non-finite cells; construction now agrees.
+
+    Accepting them in memory left a raster that could be built and analysed but
+    not written down and read back, which is the shape every one of these
+    defects has taken.
+    """
+    for bad in (math.inf, -math.inf, math.nan):
+        with pytest.raises(GridError, match="finite"):
+            Grid.from_rows([[bad]])
+        with pytest.raises(GridError, match="finite"):
+            Grid.filled(1, 1, bad)
+    assert Grid.from_rows([[1.0, None]]).values == [1.0, None]

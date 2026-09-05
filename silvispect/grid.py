@@ -64,6 +64,12 @@ def rms_of(values: Sequence[float]) -> float:
     return scale * math.sqrt(math.fsum((value / scale) ** 2 for value in values) / count)
 
 
+def _check_finite(value: Value) -> None:
+    """Refuse a cell value the writer could not put in a file."""
+    if value is not None and not math.isfinite(value):
+        raise GridError(f"cell value {value!r} is not a finite number")
+
+
 def mean_of(values: Sequence[float]) -> float:
     """Arithmetic mean that cannot overflow on finite input.
 
@@ -171,7 +177,12 @@ class Grid:
         yllcorner: float = 0.0,
         nodata_value: float = NODATA_DEFAULT,
     ) -> Grid:
-        """Return a grid of ``nrows`` x ``ncols`` cells all set to ``value``."""
+        """Return a grid of ``nrows`` x ``ncols`` cells all set to ``value``.
+
+        Raises:
+            GridError: If ``value`` is not finite.  See :meth:`from_rows`.
+        """
+        _check_finite(value)
         return cls(
             ncols=ncols,
             nrows=nrows,
@@ -192,7 +203,16 @@ class Grid:
         yllcorner: float = 0.0,
         nodata_value: float = NODATA_DEFAULT,
     ) -> Grid:
-        """Build a grid from a sequence of equal-length rows (north row first)."""
+        """Build a grid from a sequence of equal-length rows (north row first).
+
+        Raises:
+            GridError: If any cell is not finite.  :meth:`parse` has always
+                refused ``inf`` and ``NaN`` in a file, so accepting them here
+                left a raster that could be built and analysed but not written
+                down and read back — which is how a canopy model came to be
+                written with ``inf`` in it and then rejected by its own reader.
+                A cell with no measurement is ``None``, not a non-number.
+        """
         if not rows:
             raise GridError("cannot build a grid from zero rows")
         ncols = len(rows[0])
@@ -201,6 +221,8 @@ class Grid:
         values: list[Value] = []
         for row in rows:
             values.extend(row)
+        for value in values:
+            _check_finite(value)
         return cls(
             ncols=ncols,
             nrows=len(rows),
@@ -424,7 +446,18 @@ class Grid:
             raise GridError("grids differ in origin")
 
     def clip(self, minimum: float | None = None, maximum: float | None = None) -> Grid:
-        """Clamp valid values into ``[minimum, maximum]``."""
+        """Clamp valid values into ``[minimum, maximum]``.
+
+        Raises:
+            GridError: If a bound is not a finite number.  Clamping is a floor
+                and a ceiling, and neither ``inf`` nor ``NaN`` is one: a floor
+                of ``inf`` replaced every measured height with infinity, which
+                the writer then put in the file and the reader refused.  A
+                raster is only worth returning if it can be written down.
+        """
+        for name, bound in (("minimum", minimum), ("maximum", maximum)):
+            if bound is not None and not math.isfinite(bound):
+                raise GridError(f"{name} must be a finite number, got {bound!r}")
 
         def _clip(value: float) -> float:
             if minimum is not None:

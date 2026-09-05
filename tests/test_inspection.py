@@ -715,3 +715,49 @@ def test_a_reporting_floor_may_not_sit_above_the_limit_it_feeds():
     report = inspect_stand(chm=plot, config=config, run_detection=False)
     assert "SV011" in codes(report)
     assert report.max_severity is Severity.CRITICAL
+
+
+def test_coverage_is_judged_cell_by_cell_not_plot_by_plot():
+    """A hole in the coverage is not a stem the detector missed.
+
+    The whole-raster check only recognised a raster with no valid cell at all,
+    so every partly-covered plot went on being judged as though it were fully
+    covered: a plot observed in one corner reported the stems standing in its
+    nodata as detector omissions, and SV050 warned about a sensor that had
+    never looked there.
+    """
+    chm = Grid.filled(5, 5, None, cellsize=1.0)
+    for row, col in ((0, 0), (0, 1), (1, 0)):
+        chm.set(row, col, 10.0)
+    seen = Tree(tree_id="seen", x=0.5, y=4.5, dbh_cm=20.0, height_m=10.0)
+    blind = Tree(tree_id="blind", x=4.5, y=0.5, dbh_cm=20.0, height_m=10.0)
+
+    report = inspect_stand(chm=chm, trees=[seen, blind])
+    assert report.match["matched"] == 1
+    assert report.match["omissions"] == 0
+    assert report.match["recall"] == 1.0
+    assert "SV050" not in codes(report)
+
+    # A stem standing in the observed corner and genuinely undetected still
+    # counts against recall — the gate is coverage, not convenience.
+    missed = Tree(tree_id="missed", x=1.5, y=4.5, dbh_cm=20.0, height_m=10.0)
+    chm.set(0, 1, 10.0)
+    with_hole = inspect_stand(chm=chm, trees=[seen, blind, missed])
+    assert with_hole.match["omissions"] == 1
+    assert with_hole.match["recall"] == pytest.approx(0.5)
+
+
+def test_a_stem_on_the_boundary_of_the_coverage_is_judged_by_its_own_cell():
+    """Eligibility follows the cell a stem stands in, either side of the edge."""
+    chm = Grid.filled(1, 4, None, cellsize=1.0)
+    chm.set(0, 0, 12.0)
+    chm.set(0, 1, 12.0)
+    trees = [
+        Tree(tree_id="c0", x=0.5, y=0.5, dbh_cm=20.0, height_m=12.0),
+        Tree(tree_id="c1", x=1.5, y=0.5, dbh_cm=20.0, height_m=12.0),
+        Tree(tree_id="c2", x=2.5, y=0.5, dbh_cm=20.0, height_m=12.0),
+        Tree(tree_id="c3", x=3.5, y=0.5, dbh_cm=20.0, height_m=12.0),
+    ]
+    report = inspect_stand(chm=chm, trees=trees)
+    # Only the two stems standing on observed cells can be judged at all.
+    assert report.match["matched"] + report.match["omissions"] == 2

@@ -39,6 +39,13 @@ silent: a stand nobody counted has *unknown* stocking, not zero stocking. A
 detector that did run and found nothing is a different matter — that is
 evidence of an empty stand, and SV001 fires.
 
+Coverage is judged **cell by cell**. A field stem standing where the raster
+holds no measurement is not a stem the detector missed — there was nothing
+there to miss it with — so it is left out of the detection-agreement rules
+(SV050–SV052) rather than counted as an omission. Stems outside the extent are
+excluded for the same reason and reported separately by SV043. Everything else
+about the stem, including every data-quality and stocking rule, is unaffected.
+
 A canopy model whose cells are *all* nodata is the first case, not the second.
 There is nothing to look at, so detection, gap mapping and the canopy summary
 do not run at all: `metrics_source` is `none`, `tree_count` is `null`, the

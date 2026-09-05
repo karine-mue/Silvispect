@@ -16,6 +16,7 @@ from __future__ import annotations
 import heapq
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 from .grid import Grid, GridError, mean_of
@@ -235,6 +236,7 @@ def find_treetops(
     """
     config = config or DetectionConfig()
     reference = chm if reference is None else reference
+    rank = _lazy_rank(reference)
     candidates: list[tuple[int, int, float]] = []
     for row, col, height in chm.valid_cells():
         if height < config.min_height:
@@ -265,19 +267,21 @@ def find_treetops(
                 seen.add((nrow, ncol))
                 plateau.append((nrow, ncol))
                 queue.append((nrow, ncol))
-        tops.append(_plateau_apex(chm, plateau, height, len(tops) + 1, reference))
-    return _ranked(reference, tops)
+        tops.append(_plateau_apex(chm, plateau, height, len(tops) + 1, rank))
+    return _ranked(reference, tops, rank)
 
 
-def _ranked(chm: Grid, tops: list[TreeTop]) -> list[TreeTop]:
+def _ranked(
+    chm: Grid, tops: list[TreeTop], rank: Callable[[tuple[int, int]], int]
+) -> list[TreeTop]:
     """Order treetops tallest-first, breaking equal heights by outlook.
 
     The order is not cosmetic: crowns are seeded in it, so when two equally
     tall apexes reach for the same cell it decides which one keeps it.  Sorting
     by coordinate reverses under reflection and handed the cell to the other
     apex, which on a four-by-four raster lost a whole crown to the minimum-size
-    filter.  Heights alone settle almost every pair, so the outlook — which
-    costs a pass over the raster — is only computed for the apexes that tie.
+    filter.  Heights alone settle almost every pair, so the canonical rank —
+    which costs eight passes over the raster — is only asked for on a tie.
     """
     by_height: dict[float, list[TreeTop]] = {}
     for top in tops:
@@ -287,28 +291,89 @@ def _ranked(chm: Grid, tops: list[TreeTop]) -> list[TreeTop]:
     for height in sorted(by_height, reverse=True):
         tied = by_height[height]
         if len(tied) > 1:
-            tied.sort(key=lambda top: (_outlook(chm, (top.row, top.col)), top.row, top.col))
+            tied.sort(key=lambda top: rank((top.row, top.col)))
         ordered.extend(tied)
     return [replace(top, tree_id=index) for index, top in enumerate(ordered, start=1)]
 
 
-def _outlook(chm: Grid, cell: tuple[int, int]) -> list[tuple[int, float]]:
-    """How the whole raster looks from one cell: every height, by distance.
+#: The eight symmetries of a rectangle, each as the place a cell moves to and
+#: the shape it moves into: ``(row, col, nrows, ncols)``.
+_FRAMES: tuple[Callable[[int, int, int, int], tuple[int, int, int, int]], ...] = (
+    lambda r, c, h, w: (r, c, h, w),
+    lambda r, c, h, w: (r, w - 1 - c, h, w),
+    lambda r, c, h, w: (h - 1 - r, c, h, w),
+    lambda r, c, h, w: (h - 1 - r, w - 1 - c, h, w),
+    lambda r, c, h, w: (c, r, w, h),
+    lambda r, c, h, w: (c, h - 1 - r, w, h),
+    lambda r, c, h, w: (w - 1 - c, r, w, h),
+    lambda r, c, h, w: (w - 1 - c, h - 1 - r, w, h),
+)
 
-    Squared distances in whole cells and the heights at them are preserved by
-    every rotation, reflection and transposition of a raster, so two cells that
-    correspond under such a transform have the same outlook — and two that do
-    not almost always differ somewhere in it.  That makes it a tie-break which
-    travels with the plot, where the cell's own row and column reverse with it.
+
+def _lazy_rank(chm: Grid) -> Callable[[tuple[int, int]], int]:
+    """Build :func:`_canonical_rank` on first use, then reuse it.
+
+    Equal heights are rare on a measured surface, so most rasters never ask for
+    a rank at all and must not pay eight passes for the possibility.
     """
-    row, col = cell
-    ncols = chm.ncols
-    return sorted(
-        ((other_row - row) ** 2 + (other_col - col) ** 2, value)
-        for other_row in range(chm.nrows)
-        for other_col in range(ncols)
-        if (value := chm.values[other_row * ncols + other_col]) is not None
-    )
+    cached: list[Callable[[tuple[int, int]], int]] = []
+
+    def rank(cell: tuple[int, int]) -> int:
+        if not cached:
+            cached.append(_canonical_rank(chm))
+        return cached[0](cell)
+
+    return rank
+
+
+def _canonical_rank(chm: Grid) -> Callable[[tuple[int, int]], int]:
+    """Return a cell ordering that survives every symmetry of the raster.
+
+    Two cells have to be separated by something that mirrors with the plot, or
+    the answer depends on which way the array happened to be written down.  A
+    sorted list of (distance, height) pairs seen from each cell is such a
+    quantity, and it separates almost every pair — but only almost.  Two cells
+    can have identical distance profiles without any symmetry relating them, in
+    which case the fallback to row and column order decides, and *that*
+    reverses: on ``8 5 / 21 5 / 5 8 / 5 8`` it picked the other physical apex
+    after a reflection and grew a four-cell crown where the original grew
+    three.
+
+    So the raster is put in a canonical orientation instead.  Each of the eight
+    symmetries is applied and the resulting readout compared; the smallest wins,
+    and a cell is ranked by where it lands under the winning ones.  Because
+    composing a symmetry with all eight gives back all eight, the winning
+    readout — and every cell's rank in it — is the same for a raster and for
+    any rotation or reflection of it.  And two cells tie here **exactly** when
+    some symmetry of the raster maps one to the other, which is the one case
+    where no rule could have separated them.
+    """
+    values = chm.values
+    nrows, ncols = chm.nrows, chm.ncols
+    best: tuple[int, int, tuple[tuple[int, float], ...]] | None = None
+    winners: list[Callable[[int, int, int, int], tuple[int, int, int, int]]] = []
+    for place in _FRAMES:
+        _, _, height, width = place(0, 0, nrows, ncols)
+        readout: list[tuple[int, float]] = [(0, 0.0)] * (height * width)
+        for row in range(nrows):
+            offset = row * ncols
+            for col in range(ncols):
+                new_row, new_col, _, _ = place(row, col, nrows, ncols)
+                value = values[offset + col]
+                # Absent sorts before every height, and never beside one.
+                readout[new_row * width + new_col] = (0, 0.0) if value is None else (1, value)
+        key = (height, width, tuple(readout))
+        if best is None or key < best:
+            best, winners = key, [place]
+        elif key == best:
+            winners.append(place)
+
+    def rank(cell: tuple[int, int]) -> int:
+        row, col = cell
+        places = (place(row, col, nrows, ncols) for place in winners)
+        return min(new_row * width + new_col for new_row, new_col, _, width in places)
+
+    return rank
 
 
 def _plateau_apex(
@@ -316,14 +381,15 @@ def _plateau_apex(
     plateau: list[tuple[int, int]],
     height: float,
     tree_id: int,
-    reference: Grid | None = None,
+    rank: Callable[[tuple[int, int]], int],
 ) -> TreeTop:
     """Pick the one cell of an equal-height run that represents the treetop.
 
     The centre of the run first, which mirrors with it.  Where several cells
-    are equally central — an even-sided or lopsided run — the one with the
-    lowest outlook wins, and only a run whose members are genuinely
-    interchangeable falls through to row and column order.
+    are equally central — an even-sided or lopsided run — the one ranked first
+    in the raster's canonical orientation wins, and only a run whose members
+    are genuinely interchangeable, because a symmetry of the raster maps one
+    onto the other, is left with nothing to choose between them.
 
     Centrality is measured in whole integers.  Dividing by the run length puts
     a rounded mean on both sides of the comparison, and the rounding does not
@@ -345,8 +411,7 @@ def _plateau_apex(
     if len(central) == 1:
         row, col = central[0]
     else:
-        outlook_of = chm if reference is None else reference
-        row, col = min(central, key=lambda cell: (_outlook(outlook_of, cell), cell))
+        row, col = min(central, key=lambda cell: (rank(cell), cell))
     x, y = chm.cell_center(row, col)
     return TreeTop(tree_id, row, col, x, y, height)
 

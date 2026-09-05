@@ -12,7 +12,7 @@ import math
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from .grid import mean_of, rms_of, sum_of
 from .inventory import Tree
@@ -20,6 +20,7 @@ from .inventory import Tree
 __all__ = [
     "DEFAULT_FORM_FACTOR",
     "DEFAULT_WOOD_DENSITY",
+    "MIN_CLASS_WIDTH_CM",
     "MetricsError",
     "StandMetrics",
     "above_ground_biomass",
@@ -75,6 +76,18 @@ def quadratic_mean_diameter(trees: Sequence[Tree]) -> float | None:
     return rms_of(diameters)
 
 
+def _shifted(digits: float, exponent: int) -> float:
+    """``digits * 2**exponent``, reading a shift past the range as zero.
+
+    A term more than a thousand binary orders below the largest one in a sum
+    cannot change it, so its disappearance is the right answer rather than an
+    error to raise.
+    """
+    if exponent < -2100:
+        return 0.0
+    return math.ldexp(digits, exponent)
+
+
 def lorey_height(trees: Sequence[Tree]) -> float | None:
     """Basal-area weighted mean height, in metres.
 
@@ -91,30 +104,38 @@ def lorey_height(trees: Sequence[Tree]) -> float | None:
         heights.append(tree.height_m)
     if not weights:
         return None
-    # Both sides are carried in units of the largest value present, so no
-    # single ``area * height`` product and no running total can leave the
-    # finite range on stems that were individually acceptable.  Normalising the
-    # weights alone is not enough: two equal weights become 1 and 1, and the
-    # heights then reach the limit in the sum instead — two stems of the
-    # largest finite height have that height as their exact weighted mean, and
-    # asking for it raised.  Both scales cancel, one from each side of the
-    # ratio and one multiplied back in at the end.
-    weight_scale = max(weights)
-    height_scale = max(heights)
-    if weight_scale == 0.0 or height_scale == 0.0:
-        return None
-    shares = [weight / weight_scale for weight in weights]
-    weight_sum = math.fsum(shares)
-    if weight_sum == 0:
-        return None
+    # Scaling by the largest value on each side keeps the sums inside the
+    # finite range, but it destroys the other end of it: normalising a
+    # subnormal basal area by one of 1e307, or a 1e-308 height by the largest
+    # float, sends the term to zero and takes a representable answer with it —
+    # a pair whose weighted mean is 1e-308 came back as 0.
+    #
+    # So the exponent is carried separately from the digits.  ``frexp`` splits
+    # each value into a mantissa in [0.5, 1) and an integer power of two;
+    # multiplying mantissas cannot overflow or underflow, and the exponents add
+    # as plain integers however far apart they are.  Each sum is then taken in
+    # units of its own largest term, and the two scales are put back with a
+    # single ``ldexp`` at the end — which is the only place the answer is
+    # allowed to leave the range, and only if it truly does.
+    numerators: list[tuple[float, int]] = []
+    denominators: list[tuple[float, int]] = []
+    for weight, height in zip(weights, heights, strict=True):
+        weight_digits, weight_scale = math.frexp(weight)
+        height_digits, height_scale = math.frexp(height)
+        numerators.append((weight_digits * height_digits, weight_scale + height_scale))
+        denominators.append((weight_digits, weight_scale))
+
+    top_scale = max(scale for _, scale in numerators)
+    bottom_scale = max(scale for _, scale in denominators)
     # Summed exactly, so the answer is the same however the rows are ordered.
     # Running totals lose the small stems once a large one has been added, and
     # the loss depends on when it arrived: reversing a list of one 1e16 m stem
     # among twenty 1 m stems moved the result by a whole metre.
-    weighted = math.fsum(
-        share * (height / height_scale) for share, height in zip(shares, heights, strict=True)
-    )
-    return height_scale * (weighted / weight_sum)
+    top = math.fsum(_shifted(digits, scale - top_scale) for digits, scale in numerators)
+    bottom = math.fsum(_shifted(digits, scale - bottom_scale) for digits, scale in denominators)
+    if bottom == 0.0:
+        return None
+    return math.ldexp(top / bottom, top_scale - bottom_scale)
 
 
 def dominant_height(trees: Sequence[Tree], area_ha: float) -> float | None:
@@ -208,6 +229,22 @@ def simpson_index(trees: Sequence[Tree]) -> float | None:
     return 1.0 - sum(p * p for p in shares.values())
 
 
+#: Narrowest diameter class Silvispect will bin into, in centimetres.
+#:
+#: An inventory is written to three decimals by default (see
+#: ``docs/data-formats.md``), so a hundredth of a millimetre is already finer
+#: than the record a class is cut from; a band below it separates stems the
+#: file cannot tell apart.  Fixing the floor also bounds the arithmetic: the
+#: widest band number is the largest accepted diameter over this, so the
+#: decimal context below is a stated size rather than an open-ended one.
+MIN_CLASS_WIDTH_CM = 1e-3
+
+#: Digits the class arithmetic runs at.  ``MAX_DBH_CM / MIN_CLASS_WIDTH_CM``
+#: is about 1.5e159, so 160 digits carry the largest band number this domain
+#: can produce; the rest is headroom for the boundary labels computed from it.
+_CLASS_DIGITS = 200
+
+
 def _class_bound(value: Decimal) -> str:
     """Render a class boundary as the decimal it is, without a trailing zero."""
     text = format(value.normalize(), "f")
@@ -240,18 +277,31 @@ def diameter_distribution(trees: Sequence[Tree], *, class_width: float = 5.0) ->
     band below it and took a label like ``0.2-0.30000000000000004`` with it.
     Widths and diameters are written in decimal by the people who measure
     them, and dividing them as decimals puts the stem where they meant it.
+
+    Raises:
+        MetricsError: If ``class_width`` is below
+            :data:`MIN_CLASS_WIDTH_CM`.  A band finer than the inventory
+            records is not a measurement question, and the default decimal
+            context could not answer it either: at 3e-28 cm the division ran
+            out of digits and emitted a class whose own interval excluded the
+            stem in it, and a shade narrower it raised
+            ``decimal.InvalidOperation`` from inside the library.
     """
-    if class_width <= 0:
-        raise MetricsError("class_width must be positive")
+    if class_width < MIN_CLASS_WIDTH_CM:
+        raise MetricsError(
+            f"class_width must be at least {MIN_CLASS_WIDTH_CM} cm, got {class_width!r}"
+        )
     width = _as_decimal(class_width)
     counts: Counter[int] = Counter()
-    for tree in _measured(trees):
-        assert tree.dbh_cm is not None
-        counts[int(_as_decimal(tree.dbh_cm) // width)] += 1
-    return {
-        f"{_class_bound(index * width)}-{_class_bound((index + 1) * width)}": counts[index]
-        for index in sorted(counts)
-    }
+    with localcontext() as context:
+        context.prec = _CLASS_DIGITS
+        for tree in _measured(trees):
+            assert tree.dbh_cm is not None
+            counts[int(_as_decimal(tree.dbh_cm) // width)] += 1
+        return {
+            f"{_class_bound(index * width)}-{_class_bound((index + 1) * width)}": counts[index]
+            for index in sorted(counts)
+        }
 
 
 def stem_volume(tree: Tree, *, form_factor: float = DEFAULT_FORM_FACTOR) -> float | None:
@@ -274,12 +324,26 @@ def above_ground_biomass(tree: Tree, *, wood_density: float | None = None) -> fl
         return None
     if wood_density is None:
         wood_density = WOOD_DENSITY.get(tree.species.strip().upper(), DEFAULT_WOOD_DENSITY)
-    # Distributing the exponent keeps the diameter term out of the square.
-    # ``(rho * D^2 * H)^0.976`` is ``(rho * H)^0.976 * D^1.952``, and the two
-    # differ only in what overflows: squaring first reaches the finite limit
-    # above about 1.3e154 cm, for a biomass whose value is an ordinary finite
-    # number the second form returns without difficulty.
-    return 0.0673 * (wood_density * tree.height_m) ** 0.976 * tree.dbh_cm**1.952
+    # ``0.0673 * (rho * D^2 * H) ** 0.976``, evaluated so that neither end of
+    # the range is lost.  Forming the bracket directly overflows above about
+    # 1.3e154 cm of diameter; distributing the exponent as
+    # ``(rho * H) ** 0.976 * D ** 1.952`` moved the failure to the other end,
+    # where a height of 5e-324 m sent ``rho * H`` to zero and the whole biomass
+    # with it.  Both were answers an ordinary float can hold.
+    #
+    # Splitting the bracket into a mantissa and a power of two keeps every
+    # intermediate in range: the mantissas multiply safely, the exponents add
+    # as integers, and raising to the power is then
+    # ``mantissa**0.976 * 2**(0.976 * exponent)`` — whose own integer part is
+    # applied last, by the one operation that is allowed to leave the range.
+    digits, exponent = 1.0, 0
+    for value, times in ((wood_density, 1), (tree.dbh_cm, 2), (tree.height_m, 1)):
+        mantissa, scale = math.frexp(value)
+        digits *= mantissa**times
+        exponent += scale * times
+    power = 0.976 * exponent
+    whole = math.floor(power)
+    return math.ldexp(0.0673 * digits**0.976 * 2.0 ** (power - whole), whole)
 
 
 @dataclass(frozen=True)

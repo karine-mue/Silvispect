@@ -11,7 +11,7 @@ from __future__ import annotations
 import heapq
 import math
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from .grid import Grid, GridError, mean_of, stdev_of
@@ -130,18 +130,27 @@ class CanopyGap:
         }
 
 
-def _chamfer(chm: Grid, seeds: Iterable[int], *, ceiling: float | None = None) -> list[float]:
+def _chamfer(
+    chm: Grid,
+    seeds: Iterable[int] | Mapping[int, float],
+    *,
+    ceiling: float | None = None,
+) -> list[float]:
     """Distance in map units from every cell to the nearest seed cell.
 
     Orthogonal steps cost one cell width and diagonal steps ``sqrt(2)`` cell
     widths, which approximates the Euclidean distance closely enough for
     morphology on a canopy raster.  ``ceiling`` stops the search early.
+
+    Seeds start at zero, or at the distance a mapping gives them — which is how
+    a walk that counts whole cells can still begin at a fraction of one.
     """
+    starts = seeds if isinstance(seeds, Mapping) else dict.fromkeys(seeds, 0.0)
     distances: list[float] = [math.inf] * len(chm.values)
     frontier: list[tuple[float, int]] = []
-    for position in seeds:
-        distances[position] = 0.0
-        frontier.append((0.0, position))
+    for position, start in starts.items():
+        distances[position] = start
+        frontier.append((start, position))
     heapq.heapify(frontier)
 
     straight = chm.cellsize
@@ -192,18 +201,41 @@ def _canopy_distance_field(chm: Grid, threshold: float) -> list[float]:
     chamfer walks centre to centre, so an opening one cell across measured a
     full cell of clearance and reported a two-metre width on a one-metre
     square — twice the diameter of any circle that fits in it, and enough to
-    survive a minimum-width filter it should have failed.  Half a cell of that
-    step lies inside the canopy cell itself, so it is taken off; the edge
-    distance was already measured to the extent rather than to a cell centre,
-    which is what made the two halves of the minimum disagree.
+    survive a minimum-width filter it should have failed.  The edge distance
+    was already measured to the extent rather than to a cell centre, which is
+    what made the two halves of the minimum disagree.
+
+    The correction cannot be a flat half cell, because how much of the first
+    step lies inside the tree depends on which way the tree is.  Straight
+    across, the boundary is half a cell away; diagonally, the nearest point of
+    that cell is its *corner*, ``sqrt(2)/2`` of a cell away.  Taking off half
+    either way credited a plus-shaped opening with 1.83 m of clearance where a
+    circle of 1.41 m is the largest that fits, and it survived a 1.6 m minimum.
+    So the walk starts from the boundary instead of being shifted afterwards:
+    every open cell touching canopy is seeded at its own true distance to it,
+    and the chamfer carries on from there.
     """
-    seeds = [
-        position for position, value in enumerate(chm.values) if value is None or value >= threshold
-    ]
+    canopy = [value is None or value >= threshold for value in chm.values]
     half = chm.cellsize / 2.0
-    to_canopy = [max(0.0, distance - half) for distance in _chamfer(chm, seeds)]
+    corner = half * math.sqrt(2.0)
+
+    starts: dict[int, float] = {}
+    for position, blocked in enumerate(canopy):
+        if blocked:
+            starts[position] = 0.0
+            continue
+        row, col = divmod(position, chm.ncols)
+        nearest = math.inf
+        for nrow, ncol in chm.neighbors(row, col, connectivity=8):
+            if not canopy[nrow * chm.ncols + ncol]:
+                continue
+            nearest = min(nearest, half if (nrow == row or ncol == col) else corner)
+        if nearest < math.inf:
+            starts[position] = nearest
+
+    to_canopy = _chamfer(chm, starts)
     to_outside = _distance_to_outside(chm)
-    return [min(canopy, outside) for canopy, outside in zip(to_canopy, to_outside, strict=True)]
+    return [min(canopy_d, outside) for canopy_d, outside in zip(to_canopy, to_outside, strict=True)]
 
 
 def distance_to_canopy(chm: Grid, *, threshold: float = 2.0) -> Grid:

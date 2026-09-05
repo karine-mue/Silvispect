@@ -158,6 +158,9 @@ class FittedModel:
     def invert(self, height_m: float, *, lower: float = 0.1, upper: float = 400.0) -> float | None:
         """Back out the diameter implied by a height, or ``None`` if outside range.
 
+        The range is closed: a height the curve attains at ``lower`` or
+        ``upper`` inverts to that bound.
+
         The supported families are monotone in diameter, so a bisection is both
         sufficient and robust.  Monotone, not necessarily *increasing*: least
         squares is free to return a decreasing curve when the data is
@@ -172,9 +175,18 @@ class FittedModel:
             high_value = self.predict(upper)
         except ValueError:  # pragma: no cover - guarded by fit validation
             return None
+        # A height the curve reaches exactly at an endpoint is in range, and
+        # the endpoint is its answer.  Excluding both ends turned
+        # ``invert(predict(lower), lower=lower)`` — the height the curve has at
+        # the very bottom of the search — into "outside the range", which is
+        # the one thing it demonstrably is not.
+        if height_m == low_value:
+            return lower
+        if height_m == high_value:
+            return upper
         rising = high_value >= low_value
         floor, ceiling = (low_value, high_value) if rising else (high_value, low_value)
-        if height_m <= floor or height_m >= ceiling:
+        if height_m < floor or height_m > ceiling:
             return None
         low, high = lower, upper
         for _ in range(200):

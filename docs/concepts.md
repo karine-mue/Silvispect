@@ -44,7 +44,7 @@ artefact of resolution:
 ```console
 $ silvispect gaps data/plot-a1-chm.asc --min-width 0
 3 gaps at or above 25 m2 and 0.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        511 m2  width  11.8 m  ...   <- one opening fused to the web
+  gap 1        511 m2  width  11.6 m  ...   <- one opening fused to the web
 ```
 
 Silvispect applies the **Brokaw criterion**: a gap must be wide enough to
@@ -56,7 +56,7 @@ components" filter cannot do. Labelling then runs on the opened mask:
 ```console
 $ silvispect gaps data/plot-a1-chm.asc
 3 gaps at or above 25 m2 and 5.0 m wide; 36.4% of the plot is below 2.0 m
-  gap 1        161 m2  width  11.8 m  ...   <- the opening alone
+  gap 1        160 m2  width  11.6 m  ...   <- the opening alone
 ```
 
 Both report the *same* inscribed width: the difference is entirely tentacles of
@@ -118,10 +118,18 @@ diagonal contact carry the edge flag into an opening that four-connectivity had
 deliberately kept separate.
 
 Distances are measured to the canopy's **boundary**, not to the centre of the
-cell beyond it. Half of the step from an open cell's centre to a canopy cell's
+cell beyond it. Part of the step from an open cell's centre to a canopy cell's
 centre lies inside the canopy, so it is not clearance: counting it let a
 one-metre square opening claim a two-metre inscribed circle and survive a
 `min_width` of 1.5 m that it should have failed.
+
+How much of that step is inside depends on which way the tree lies, so the
+correction cannot be a flat half cell. Straight across, the boundary is half a
+cell away; diagonally, the nearest point of that cell is its **corner**,
+`sqrt(2)/2` of a cell away. Taking off half either way credited a plus-shaped
+opening with 1.83 m of clearance where 1.41 m is the largest circle that fits.
+The walk therefore starts *at* the boundary: every open cell touching canopy is
+seeded with its own true distance to it, and the chamfer carries on from there.
 
 Two consequences of "as mapped" are worth stating plainly. The **plot edge is a
 boundary** for the inscribed circle too, measured the same way — half a cell
@@ -174,11 +182,23 @@ for — but it must not also be what decides between them. On `2 3 / 4 9 / 3 2`
 smoothing produces a surface that is its own mirror image, and nothing in it
 distinguishes the two maxima that the raster distinguishes easily.
 
+Cells that a tie reaches are separated by putting the raster in a **canonical
+orientation**: each of the eight symmetries is applied, the resulting readouts
+are compared, and a cell is ranked by where it lands under the smallest of
+them. Composing a symmetry with all eight gives back all eight, so the winning
+readout — and every cell's rank in it — is the same for a raster and for any
+rotation or reflection of it. A weaker summary is not enough: ranking by the
+sorted list of (distance, height) pairs seen from each cell separates almost
+every pair, and on `8 5 / 21 5 / 5 8 / 5 8` two candidates had identical lists
+without any symmetry relating them, so the fallback to row and column order
+decided and reversed with the plot.
+
 Detection is therefore equivariant: rotating or reflecting a plot rotates or
-reflects the trees found in it. The exception is a plot that really is
-symmetric — a flat run with no middle cell has no apex that mirrors onto
-itself — where the count and the crown sizes are fixed but the choice between
-two interchangeable cells cannot be.
+reflects the apexes and the crown cells found in it, not merely their number.
+Two cells tie in the canonical order **exactly** when some symmetry of the
+raster maps one onto the other — the one case where no rule could have chosen,
+since a flat run with no middle cell has no apex that mirrors onto itself.
+There the count and the crown sizes are still fixed.
 
 The CHM is mean-filtered first (radius 1 cell by default). This suppresses the
 single-cell spikes that would otherwise each become a tree, at the cost of a

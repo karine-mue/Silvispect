@@ -19,7 +19,7 @@ a correction to behaviour that was wrong. Two of them are visible in output —
 decimals, and gains an optional `--precision` to round on request — but neither
 is a new capability. The rounding was the defect.
 
-Eight rounds of review after the release found these. As before, each fix
+Nine rounds of review after the release found these. As before, each fix
 carries a test that fails against the code as it stood — and where the defect
 violated a general property, that property is what the test asserts, over
 randomized inputs rather than the one raster that exposed it.
@@ -286,6 +286,63 @@ them serious, two of them introduced by the seventh round itself:
   brings the result back into range. The exponent is distributed.
 - `docs/concepts.md` still described the plateau apex as "the first in
   row-major order", which the seventh round replaced.
+
+Ninth round — a release-candidate review found eight more defects, two of them
+serious, three of them introduced by the eighth round:
+
+- **Coverage was judged plot-wide, not cell by cell.** The eighth round taught
+  the inspection to recognise a raster with *no* valid cell, but a partly
+  covered plot went on being judged as though it were fully covered: a stem
+  standing in a nodata hole counted as a detector omission, halving recall and
+  raising SV050 about a sensor that had never looked there. Eligibility for the
+  detection-agreement rules now follows each stem's own cell.
+- **Detection was still not equivariant, and the count could not see it.**
+  *Introduced by the eighth round.* Ranking tied candidates by the sorted list
+  of (distance, height) pairs seen from each cell separates almost every pair —
+  but on `8 5 / 21 5 / 5 8 / 5 8` two candidates had identical lists without
+  any symmetry relating them, so the fallback to row and column order decided
+  and reversed with the plot, growing a four-cell crown where the original grew
+  three. The raster is put in a **canonical orientation** instead: each of the
+  eight symmetries is applied, the smallest readout wins, and a cell is ranked
+  by where it lands in it. Two cells tie there exactly when a symmetry of the
+  raster maps one onto the other, which is the one case where nothing could
+  have chosen. Across 16,800 comparisons over rasters with no symmetry of their
+  own — unsmoothed and smoothed — apexes, crown cells and crown sizes now all
+  transform exactly, where four cell mismatches remained before.
+- **Diagonal canopy boundaries still overstated gap width.** Taking a flat half
+  cell off the walk is right straight across and wrong on the diagonal, where
+  the nearest point of the cell is its *corner*: a plus-shaped opening claimed
+  1.83 m of clearance where 1.41 m is the largest circle that fits, and
+  survived a 1.6 m minimum. The walk now starts at the boundary — every open
+  cell touching canopy is seeded with its own true distance — instead of being
+  shifted afterwards. **Reported widths tighten again**: on the sample plot the
+  three gaps go from 11.8/5.3/5.3 m to 11.6/5.1/5.1 m.
+- **Lorey's height had been repaired from an overflow into an underflow.**
+  *Introduced by the eighth round.* Scaling both sides by their largest value
+  sends a subnormal basal area, or a 1e-308 height beside the largest float, to
+  zero — so a pair whose weighted mean is 1e-308 came back as 0. The exponents
+  are carried as integers now, so neither end of the range can be lost.
+- **The biomass equation had the same trade.** *Introduced by the eighth
+  round.* Distributing the exponent stopped the diameter overflowing and made
+  `rho * H` underflow instead: a height of 5e-324 m took the whole biomass to
+  zero, for a result an ordinary float holds. The bracket is carried as a
+  mantissa and a power of two, which loses neither end. Both are checked
+  against a high-precision Decimal oracle across the accepted range.
+- **`chm` could still write a raster its own reader refuses.** The subtraction
+  was checked; the clamp applied to its result was not, so a `floor` of `inf`
+  replaced every height with infinity after the check had passed. Non-finite
+  clamp bounds are refused, and — closing the family rather than the case —
+  `Grid.from_rows` and `Grid.filled` now refuse non-finite cells too, which
+  `Grid.parse` always did. A cell with no measurement is `None`.
+- Diameter classes narrower than the inventory's own record could not be
+  computed: at 3e-28 cm the decimal division ran out of digits and emitted a
+  class whose interval excluded the stem in it, and a shade narrower
+  `decimal.InvalidOperation` escaped. `class_width` is refused below **0.001
+  cm** — a hundredth of a millimetre, finer than the three decimals an
+  inventory is written to — and the arithmetic is sized from that floor.
+- Inversion refused the ends of its own range: `invert(predict(lower),
+  lower=lower)` returned `None`, though the documentation says `None` means the
+  height lies outside the range. Both endpoints are inside it.
 
 Default inventory CSV serialisation was examined and **left unchanged**. It
 rounds to three decimals, so a stem four ten-thousandths outside a match

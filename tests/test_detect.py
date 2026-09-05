@@ -9,6 +9,7 @@ import pytest
 
 from silvispect.detect import (
     DetectionConfig,
+    _canonical_rank,
     crown_radius_limit,
     detect_trees,
     find_treetops,
@@ -327,7 +328,10 @@ def test_detection_follows_the_raster_through_every_symmetry(rows, name, cellsiz
     assert sorted(len(crown.cells) for crown in after.crowns) == sorted(
         len(crown.cells) for crown in original.crowns
     )
-    if turned.values != grid.values:
+    if not _self_symmetric(grid):
+        assert {follow((crown.apex.row, crown.apex.col)) for crown in original.crowns} == {
+            (crown.apex.row, crown.apex.col) for crown in after.crowns
+        }
         assert sorted(
             tuple(sorted(map(follow, crown.cells))) for crown in original.crowns
         ) == sorted(tuple(sorted(crown.cells)) for crown in after.crowns)
@@ -471,3 +475,95 @@ def test_crown_membership_does_not_depend_on_the_vertical_unit(scale):
     rows = [[3.0 * scale, 2.0 * scale, 1.0 * scale, scale * (1.0 + 5e-10)]]
     crowns = detect_trees(Grid.from_rows(rows, cellsize=1.0), config).crowns
     assert [len(crown.cells) for crown in crowns] == [4]
+
+
+def test_a_distance_profile_is_not_enough_to_separate_two_apexes():
+    """The reported case: two candidates with identical distance profiles.
+
+    ``8 5 / 21 5 / 5 8 / 5 8`` has no symmetry of its own, but two of its
+    smoothed candidates see the raster identically by distance and height, so
+    the fallback to row and column order decided — and *that* reverses.  After
+    the reflection it picked the other physical apex and grew a four-cell crown
+    where the original grew three.  The raster is put in a canonical
+    orientation instead, which separates every pair no symmetry relates.
+    """
+    rows = [[8.0, 5.0], [21.0, 5.0], [5.0, 8.0], [5.0, 8.0]]
+    grid = Grid.from_rows(rows)
+    assert not _self_symmetric(grid)
+    turned, follow = moved(grid, "flipud")
+
+    original = detect_trees(grid)
+    after = detect_trees(turned)
+    assert sorted(len(c.cells) for c in original.crowns) == sorted(
+        len(c.cells) for c in after.crowns
+    )
+    assert sorted(tuple(sorted(map(follow, c.cells))) for c in original.crowns) == sorted(
+        tuple(sorted(c.cells)) for c in after.crowns
+    )
+    assert {follow((c.apex.row, c.apex.col)) for c in original.crowns} == {
+        (c.apex.row, c.apex.col) for c in after.crowns
+    }
+
+
+@pytest.mark.parametrize("smooth", [0, 1])
+@pytest.mark.parametrize("cellsize", [0.25, 1.0])
+def test_a_raster_with_no_symmetry_of_its_own_detects_equivariantly(smooth, cellsize):
+    """Apexes, crown cells and crown sizes all transform, not just the count.
+
+    Heights come from a short list so that ties — the whole reason the ordering
+    rules exist — actually occur; a continuous draw would almost never produce
+    one.  Rasters that are their own mirror image are the single case no rule
+    can settle, and they are skipped explicitly rather than silently.
+    """
+    rng = random.Random(20240915 + smooth)
+    config = DetectionConfig(smooth_radius=smooth)
+    levels = (8.0, 7.0, 4.0, 3.0, 20.0)
+    checked = 0
+    for _ in range(160):
+        nrows, ncols = rng.randint(1, 5), rng.randint(1, 5)
+        rows = [[rng.choice(levels) for _ in range(ncols)] for _ in range(nrows)]
+        grid = Grid.from_rows(rows, cellsize=cellsize)
+        if _self_symmetric(grid):
+            continue
+        checked += 1
+        original = detect_trees(grid, config)
+        for name in SYMMETRIES:
+            turned, follow = moved(grid, name)
+            after = detect_trees(turned, config)
+            assert len(after.crowns) == len(original.crowns), (rows, name)
+            assert sorted(len(c.cells) for c in after.crowns) == sorted(
+                len(c.cells) for c in original.crowns
+            ), (rows, name)
+            assert {follow((c.apex.row, c.apex.col)) for c in original.crowns} == {
+                (c.apex.row, c.apex.col) for c in after.crowns
+            }, (rows, name)
+            assert sorted(tuple(sorted(map(follow, c.cells))) for c in original.crowns) == sorted(
+                tuple(sorted(c.cells)) for c in after.crowns
+            ), (rows, name)
+    assert checked > 90, "too few asymmetric rasters drawn to prove anything"
+
+
+def test_only_a_symmetry_of_the_raster_leaves_two_cells_interchangeable():
+    """The canonical rank ties exactly when nothing could have separated them.
+
+    That is the property the whole ordering rests on: a tie here means some
+    rotation or reflection of the raster maps one cell onto the other, so no
+    rule could have chosen between them.
+    """
+    rng = random.Random(4242)
+    for _ in range(200):
+        nrows, ncols = rng.randint(1, 4), rng.randint(1, 4)
+        rows = [[float(rng.randint(0, 3)) for _ in range(ncols)] for _ in range(nrows)]
+        grid = Grid.from_rows(rows, cellsize=1.0)
+        rank = _canonical_rank(grid)
+        cells = [(r, c) for r in range(nrows) for c in range(ncols)]
+        for first in cells:
+            for second in cells:
+                if first == second:
+                    continue
+                related = any(
+                    moved(grid, name)[0].values == grid.values
+                    and moved(grid, name)[1](first) == second
+                    for name in SYMMETRIES
+                )
+                assert (rank(first) == rank(second)) is related, (rows, first, second)

@@ -767,6 +767,31 @@ class InspectionReport:
         return payload
 
 
+def _observed_trees(chm: Grid | None, trees: Sequence[Tree]) -> list[Tree]:
+    """The stems the canopy model could have had something to say about.
+
+    A detector reports what it can see, so a stem standing where the raster
+    holds no measurement is not a stem it missed — there was nothing there to
+    miss it with.  Counting those against recall turned a hole in the coverage
+    into a warning about the sensor: a plot observed in one corner and nodata
+    everywhere else reported half its stems as omissions.
+
+    Coverage is a property of each location, not of the plot: the whole-raster
+    check that came before this only recognised a raster with no valid cell at
+    all, and every partly-covered plot went on being judged as though it were
+    fully covered.  Stems outside the extent are excluded for the same reason,
+    and SV043 reports them separately.
+    """
+    if chm is None:
+        return list(trees)
+    observed: list[Tree] = []
+    for tree in trees:
+        cell = chm.cell_of(tree.x, tree.y)
+        if cell is not None and chm.get(*cell) is not None:
+            observed.append(tree)
+    return observed
+
+
 def inspect_stand(
     *,
     chm: Grid | None = None,
@@ -857,7 +882,9 @@ def inspect_stand(
     )
     match: MatchResult | None = None
     if detection is not None and field_trees is not None:
-        match = match_trees(detection.crowns, field_trees, tolerance=config.match_tolerance_m)
+        match = match_trees(
+            detection.crowns, _observed_trees(chm, field_trees), tolerance=config.match_tolerance_m
+        )
 
     ctx = InspectionContext(
         config=config,

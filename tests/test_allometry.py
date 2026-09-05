@@ -249,3 +249,27 @@ def test_inverting_a_rising_curve_is_unchanged():
     for dbh in (8.0, 16.0, 24.0):
         assert model.invert(model.predict(dbh)) == pytest.approx(dbh, rel=1e-4)
     assert model.invert(500.0) is None
+
+
+@pytest.mark.parametrize("family", ["naslund", "power"])
+def test_the_ends_of_the_inversion_range_are_inside_it(family):
+    """A height the curve reaches at an endpoint inverts to that endpoint.
+
+    ``None`` is documented as meaning the height lies outside the range, and
+    the height the curve has *at* ``lower`` demonstrably does not — but both
+    ends were excluded, so asking for the diameter the curve itself predicts
+    there answered "outside".
+    """
+    rising = [(5.0, 4.0), (10.0, 8.0), (15.0, 12.0), (20.0, 15.0), (25.0, 17.0), (30.0, 19.0)]
+    falling = [(1.0, 100.0), (2.0, 50.0), (4.0, 25.0), (8.0, 12.5), (16.0, 6.25), (32.0, 3.125)]
+    model = fit_height_diameter(rising if family == "naslund" else falling, model=family)
+
+    assert model.invert(model.predict(10.0), lower=10.0, upper=20.0) == pytest.approx(10.0)
+    assert model.invert(model.predict(20.0), lower=10.0, upper=20.0) == pytest.approx(20.0)
+    # Just outside is still outside, in whichever direction the curve runs.
+    assert model.invert(model.predict(9.0), lower=10.0, upper=20.0) is None
+    assert model.invert(model.predict(21.0), lower=10.0, upper=20.0) is None
+    # And the interior is unchanged.
+    assert model.invert(model.predict(15.0), lower=10.0, upper=20.0) == pytest.approx(
+        15.0, rel=1e-4
+    )

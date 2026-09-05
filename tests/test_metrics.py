@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import decimal
 import math
 import sys
 from decimal import Decimal
 
 import pytest
 
-from silvispect.inventory import Tree
+from silvispect.inventory import MAX_DBH_CM, Tree
 from silvispect.metrics import (
+    DEFAULT_WOOD_DENSITY,
+    MIN_CLASS_WIDTH_CM,
     MetricsError,
     above_ground_biomass,
     basal_area,
@@ -298,7 +301,9 @@ def test_lorey_height_survives_heights_as_large_as_diameters():
         Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=1.0, height_m=peak),
         Tree(tree_id="b", x=1.0, y=0.0, dbh_cm=1.0, height_m=peak),
     ]
-    assert lorey_height(equal) == peak
+    # To the last ulp a weighted mean is a division, not an identity; what it
+    # must not do is leave the range.
+    assert lorey_height(equal) == pytest.approx(peak, rel=1e-15)
 
     mixed = [
         Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=1e150, height_m=peak / 2),
@@ -365,3 +370,106 @@ def test_a_stem_on_a_class_boundary_starts_the_upper_class():
     stem = [Tree(tree_id="t", x=0.0, y=0.0, dbh_cm=0.3)]
     assert diameter_distribution(stem, class_width=0.1) == {"0.3-0.4": 1}
     assert diameter_distribution(stem, class_width=0.3) == {"0.3-0.6": 1}
+
+
+def _lorey_oracle(trees):
+    """The weighted mean at 400 digits, far outside anything a float can lose."""
+    with decimal.localcontext() as context:
+        context.prec = 400
+        pairs = [(t.basal_area_m2, t.height_m) for t in trees]
+        top = sum(decimal.Decimal(w) * decimal.Decimal(h) for w, h in pairs)
+        return top / sum(decimal.Decimal(w) for w, _ in pairs)
+
+
+def _biomass_oracle(dbh_cm, height_m, wood_density=DEFAULT_WOOD_DENSITY):
+    with decimal.localcontext() as context:
+        context.prec = 120
+        inner = (
+            decimal.Decimal(wood_density) * decimal.Decimal(dbh_cm) ** 2 * decimal.Decimal(height_m)
+        )
+        return decimal.Decimal("0.0673") * (inner.ln() * decimal.Decimal("0.976")).exp()
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        ((1e-159, sys.float_info.max), (1e156, 1e-308)),
+        ((1.0, sys.float_info.max), (1.0, sys.float_info.max)),
+        ((1e150, 1e-300), (1e-150, 1e300)),
+        ((1e-160, 1e-320), (1e155, 1e-100)),
+        ((20.0, 15.0), (40.0, 25.0)),
+        ((1e-3, 1e-3), (1e150, 1e150)),
+    ],
+)
+def test_lorey_height_matches_a_high_precision_oracle_across_the_range(first, second):
+    """Scaling by the largest value protects one end and destroys the other.
+
+    Normalising a subnormal basal area against one of 1e307, or a 1e-308 height
+    against the largest float, sends the term to zero — so a pair whose
+    weighted mean is 1e-308 came back as 0, having been repaired out of an
+    overflow into an underflow.  The exponents are carried as integers now, so
+    neither end can be lost.
+    """
+    trees = [
+        Tree(tree_id="a", x=0.0, y=0.0, dbh_cm=first[0], height_m=first[1]),
+        Tree(tree_id="b", x=1.0, y=0.0, dbh_cm=second[0], height_m=second[1]),
+    ]
+    value = lorey_height(trees)
+    expected = float(_lorey_oracle(trees))
+    assert value is not None and math.isfinite(value) and value > 0.0
+    assert value == pytest.approx(expected, rel=1e-12)
+    # The exact-summation contract from the earlier repair still holds.
+    assert lorey_height(trees) == lorey_height(list(reversed(trees)))
+
+
+@pytest.mark.parametrize(
+    "dbh_cm,height_m",
+    [
+        (1e154, 5e-324),
+        (1e155, 1.0),
+        (1e156, 1e-320),
+        (1e-100, 1e-100),
+        (1.0, 1e300),
+        (30.0, 20.0),
+        (0.5, 0.5),
+    ],
+)
+def test_biomass_matches_a_high_precision_oracle_across_the_range(dbh_cm, height_m):
+    """Distributing the exponent traded an overflow for an underflow.
+
+    ``(rho * H) ** 0.976`` sends a height of 5e-324 m to zero and the whole
+    biomass with it, for a result an ordinary float holds without difficulty.
+    Neither end is lost when the bracket is carried as a mantissa and a power
+    of two.
+    """
+    value = above_ground_biomass(Tree(tree_id="x", x=0.0, y=0.0, dbh_cm=dbh_cm, height_m=height_m))
+    expected = float(_biomass_oracle(dbh_cm, height_m))
+    assert value is not None and math.isfinite(value) and value > 0.0
+    assert value == pytest.approx(expected, rel=1e-12)
+
+
+def test_a_diameter_class_narrower_than_the_record_is_refused():
+    """The inventory keeps three decimals, so a finer band separates nothing.
+
+    Below that the arithmetic could not answer either: at 3e-28 cm the decimal
+    division ran out of digits and produced a class whose own interval excluded
+    the stem inside it, and a shade narrower ``decimal.InvalidOperation``
+    escaped from the library.
+    """
+    stem = [Tree(tree_id="t", x=0.0, y=0.0, dbh_cm=1.0)]
+    for bad in (3e-29, 3e-28, MIN_CLASS_WIDTH_CM * 0.999, 0.0, -1.0):
+        with pytest.raises(MetricsError, match="class_width"):
+            diameter_distribution(stem, class_width=bad)
+
+    # Exactly at the bound the answer is ordinary, and it contains the stem.
+    at_bound = diameter_distribution(stem, class_width=MIN_CLASS_WIDTH_CM)
+    (label,) = at_bound
+    low, high = (Decimal(part) for part in label.split("-"))
+    assert low <= Decimal("1.0") < high
+    assert high - low == Decimal(repr(MIN_CLASS_WIDTH_CM))
+
+    # The widest stem the inventory accepts, at the narrowest band it accepts.
+    widest = [Tree(tree_id="w", x=0.0, y=0.0, dbh_cm=MAX_DBH_CM)]
+    (extreme,) = diameter_distribution(widest, class_width=MIN_CLASS_WIDTH_CM)
+    low, high = (Decimal(part) for part in extreme.split("-"))
+    assert low <= Decimal(repr(MAX_DBH_CM)) < high
