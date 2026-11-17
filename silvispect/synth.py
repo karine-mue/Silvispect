@@ -79,6 +79,22 @@ class SynthConfig:
             raise ValueError("at least one species is required")
         if self.stems_per_ha < 0:
             raise ValueError("stems_per_ha must be non-negative")
+        if self.dbh_min <= 0 or self.dbh_min > self.dbh_max:
+            raise ValueError("dbh range must satisfy 0 < dbh_min <= dbh_max")
+        if any(w < 0 for w in self.species_weights) or not any(
+            w > 0 for w in self.species_weights
+        ):
+            raise ValueError(
+                "species_weights must be non-negative with at least one positive value"
+            )
+        if self.surface_noise < 0 or self.height_noise < 0:
+            raise ValueError("surface_noise and height_noise must be non-negative")
+        if not 0 <= self.gap_radius[0] <= self.gap_radius[1]:
+            raise ValueError("gap_radius must satisfy 0 <= gap_radius[0] <= gap_radius[1]")
+        if isinstance(self.gap_count, bool) or not isinstance(self.gap_count, int):
+            raise ValueError("gap_count must be an integer")
+        if self.gap_count < 0:
+            raise ValueError("gap_count must be non-negative")
 
     @property
     def shape(self) -> tuple[int, int]:
