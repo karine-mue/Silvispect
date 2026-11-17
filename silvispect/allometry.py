@@ -56,6 +56,8 @@ class ModelSpec:
 def _curtis(dbh: float, p: Sequence[float]) -> float:
     if dbh <= 0:
         return BREAST_HEIGHT
+    if p[0] <= 0 or p[1] <= 0:
+        raise ValueError("invalid Curtis parameters")
     return BREAST_HEIGHT + p[0] * (dbh / (1.0 + dbh)) ** p[1]
 
 
@@ -155,23 +157,63 @@ class FittedModel:
         """Predict total height in metres for a diameter in centimetres."""
         return self.spec.evaluate(dbh_cm, self.params)
 
-    def invert(self, height_m: float, *, lower: float = 0.1, upper: float = 400.0) -> float | None:
+    def invert(
+        self, height_m: float, *, lower: float = 0.1, upper: float | None = None
+    ) -> float | None:
         """Back out the diameter implied by a height, or ``None`` if outside range.
 
-        The supported families are monotonically increasing in diameter, so a
-        bisection is both sufficient and robust.
+        The range is closed: a height the curve attains at ``lower`` or
+        ``upper`` inverts to that bound.
+
+        When ``upper`` is not given the search starts at 400 and, if the height
+        lies beyond the curve's value at the upper end, ``upper`` is doubled
+        (up to 51200) until the height is inside the range.  A height past the
+        curve's asymptote stays ``None``.  An explicit ``upper`` is never
+        widened, and a height outside the range on the ``lower`` side is never
+        widened for.
+
+        The supported families are monotone in diameter, so a bisection is both
+        sufficient and robust.  Monotone, not necessarily *increasing*: least
+        squares is free to return a decreasing curve when the data is
+        decreasing, and it does — six stems whose height halves as the diameter
+        doubles fit a power model at ``b = -1``.  Assuming the increasing
+        direction turned every such inversion into ``None``, so a curve the
+        fitter had just returned could not be read backwards at all.  Which way
+        the curve runs is read off its own endpoints instead.
         """
+        widen = upper is None
+        if upper is None:
+            upper = 400.0
         try:
             low_value = self.predict(lower)
             high_value = self.predict(upper)
+            if widen:
+                while upper < 51200.0:
+                    going_up = high_value >= low_value
+                    beyond = height_m > high_value if going_up else height_m < high_value
+                    if not beyond:
+                        break
+                    upper *= 2.0
+                    high_value = self.predict(upper)
         except ValueError:  # pragma: no cover - guarded by fit validation
             return None
-        if height_m <= low_value or height_m >= high_value:
+        # A height the curve reaches exactly at an endpoint is in range, and
+        # the endpoint is its answer.  Excluding both ends turned
+        # ``invert(predict(lower), lower=lower)`` — the height the curve has at
+        # the very bottom of the search — into "outside the range", which is
+        # the one thing it demonstrably is not.
+        if height_m == low_value:
+            return lower
+        if height_m == high_value:
+            return upper
+        rising = high_value >= low_value
+        floor, ceiling = (low_value, high_value) if rising else (high_value, low_value)
+        if height_m < floor or height_m > ceiling:
             return None
         low, high = lower, upper
         for _ in range(200):
             mid = (low + high) / 2.0
-            if self.predict(mid) < height_m:
+            if (self.predict(mid) < height_m) is rising:
                 low = mid
             else:
                 high = mid
@@ -237,7 +279,11 @@ def fit_height_diameter(
         raise AllometryError(f"unknown model {model!r}; choose from {sorted(MODELS)}")
     if min_points < 1:
         raise AllometryError("min_points must be at least 1")
-    pairs = _as_pairs(data)
+    # Least squares is permutation-invariant in real arithmetic but not in
+    # floating point: a different summation order nudges the optimiser onto a
+    # slightly different path, so the same stand reported different parameters
+    # depending on the order its rows were listed in.  Fit in a canonical order.
+    pairs = sorted(_as_pairs(data))
     if not pairs:
         raise AllometryError("no paired diameter and height measurements to fit")
     if len(pairs) < min_points:
@@ -293,7 +339,11 @@ def fit_by_species(
     try:
         models[""] = fit_height_diameter(trees, model=model, min_points=min_points)
     except AllometryError:
-        dominant = max(sorted(groups), key=lambda code: len(groups[code])) if groups else ""
+        dominant = (
+            max(sorted(groups), key=lambda code: len(paired_measurements(groups[code])))
+            if groups
+            else ""
+        )
         models[""] = default_model(dominant)
 
     for code, members in groups.items():
@@ -332,16 +382,22 @@ def default_model(species: str = "", *, model: str = DEFAULT_MODEL) -> FittedMod
 
 
 def residual_scores(model: FittedModel, trees: Sequence[Tree]) -> list[tuple[Tree, float, float]]:
-    """Return ``(tree, residual, z_score)`` for every tree with both dimensions.
+    """Return ``(tree, residual, z_score)`` for every live tree with both dimensions.
 
-    The z-score uses the standard deviation of the residuals themselves, so it
-    measures departure from the stand's own curve rather than from an external
-    expectation.
+    Dead trees are not scored.  The z-score is leave-one-out: each residual is
+    compared with the mean and unbiased standard deviation of the *other*
+    residuals, so a single outlier cannot inflate the spread it is judged
+    against.  It measures departure from the stand's own curve rather than from
+    an external expectation.  With fewer than three trees every score is zero.
     """
     usable = [
         tree
         for tree in trees
-        if tree.dbh_cm and tree.height_m and tree.dbh_cm > 0 and tree.height_m > 0
+        if tree.is_live
+        and tree.dbh_cm
+        and tree.height_m
+        and tree.dbh_cm > 0
+        and tree.height_m > 0
     ]
     if not usable:
         return []
@@ -350,18 +406,36 @@ def residual_scores(model: FittedModel, trees: Sequence[Tree]) -> list[tuple[Tre
         for tree in usable
         if tree.height_m is not None and tree.dbh_cm is not None
     ]
-    n = len(residuals)
-    mean = sum(residuals) / n
-    if n > 1:
-        variance = sum((r - mean) ** 2 for r in residuals) / (n - 1)
-        stdev = math.sqrt(variance)
-    else:
-        stdev = 0.0
+    scores = _leave_one_out_z(residuals)
     scored: list[tuple[Tree, float, float]] = []
-    for tree, residual in zip(usable, residuals, strict=True):
-        z = 0.0 if stdev == 0 else (residual - mean) / stdev
+    for tree, residual, z in zip(usable, residuals, scores, strict=True):
         scored.append((tree, residual, z))
     return scored
+
+
+def _leave_one_out_z(values: Sequence[float]) -> list[float]:
+    """Leave-one-out z-scores: each value against the mean and sd of the others.
+
+    Fewer than three values give all zeros.  When the others have no spread, a
+    value equal to their mean scores ``0.0`` and any other value scores a signed
+    infinity.
+    """
+    items = list(values)
+    count = len(items)
+    if count < 3:
+        return [0.0] * count
+    scores: list[float] = []
+    for index, value in enumerate(items):
+        others = items[:index] + items[index + 1 :]
+        mean = sum(others) / len(others)
+        variance = sum((other - mean) ** 2 for other in others) / (len(others) - 1)
+        stdev = math.sqrt(variance)
+        deviation = value - mean
+        if stdev == 0:
+            scores.append(0.0 if deviation == 0 else math.copysign(math.inf, deviation))
+        else:
+            scores.append(deviation / stdev)
+    return scores
 
 
 def _finite(value: float, digits: int = 4) -> float | None:
@@ -380,6 +454,6 @@ def _as_pairs(data: Sequence[Tree] | Sequence[tuple[float, float]]) -> list[tupl
     pairs: list[tuple[float, float]] = []
     for item in data:
         dbh, height = item  # type: ignore[misc]
-        if dbh > 0 and height > 0:
+        if dbh > 0 and height > 0 and math.isfinite(dbh) and math.isfinite(height):
             pairs.append((float(dbh), float(height)))
     return pairs
