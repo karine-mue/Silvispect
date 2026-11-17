@@ -139,3 +139,27 @@ def test_smooth_median_does_not_overflow():
     grid = Grid.from_rows([[1e308, 1e308], [1e308, 1e308]])
     out = grid.smooth_median(radius=1)
     assert all(v == 1e308 for v in out.values)
+
+
+# --- #14: far-edge coordinates belong to the edge cells -------------------------
+
+def test_cell_of_east_and_south_edges():
+    grid = Grid.from_rows([[5.0, 5.0, 5.0]] * 3, cellsize=1.0)
+    assert grid.cell_of(3.0, 1.5) == (1, 2)
+    assert grid.cell_of(1.5, 0.0) == (2, 1)
+    assert grid.cell_of(3.0, 0.0) == (2, 2)
+    assert grid.cell_of(3.5, 1.5) is None
+    assert grid.cell_of(1.5, -0.5) is None
+
+
+def test_edge_tree_is_observed_and_not_flagged_outside():
+    from silvispect.inspection import inspect_stand
+    from silvispect.inventory import Tree
+
+    chm = Grid.from_rows([[5.0, 5.0, 5.0]] * 3, cellsize=1.0)
+    edge = Tree("EDGE", 3.0, 1.5, dbh_cm=20.0, height_m=5.0)
+    outside = Tree("OUT", 3.5, 1.5, dbh_cm=20.0, height_m=5.0)
+    report = inspect_stand(chm=chm, trees=[edge, outside], area_ha=0.0009)
+    flagged = {f.subject for f in report.findings if f.code == "SV043"}
+    assert "tree:OUT" in flagged
+    assert "tree:EDGE" not in flagged

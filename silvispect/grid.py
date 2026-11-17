@@ -322,9 +322,21 @@ class Grid:
         return (x, y)
 
     def cell_of(self, x: float, y: float) -> Cell | None:
-        """Return the cell containing map coordinate ``(x, y)`` or ``None``."""
+        """Return the cell containing map coordinate ``(x, y)`` or ``None``.
+
+        The far edges belong to the edge cells: the extent is inclusive
+        (SV043 judges coordinates against it), so a point exactly on the
+        east or south edge lies in the last column or row.  Floor
+        arithmetic alone put it one cell past the grid, and a stem there
+        vanished — counted neither as observed nor as outside.
+        """
         col = math.floor((x - self.xllcorner) / self.cellsize)
         row = math.floor((self.yllcorner + self.nrows * self.cellsize - y) / self.cellsize)
+        _, ymin, xmax, _ = self.extent
+        if col == self.ncols and x == xmax:
+            col = self.ncols - 1
+        if row == self.nrows and y == ymin:
+            row = self.nrows - 1
         if not self.in_bounds(row, col):
             return None
         return (row, col)
