@@ -7,6 +7,7 @@ evaluations, which keeps model definitions to a single lambda each.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -67,7 +68,7 @@ def nelder_mead(
             value = float(objective(point))
         except (ValueError, ZeroDivisionError, OverflowError):
             return float("inf")
-        if value != value:  # NaN
+        if not math.isfinite(value):  # NaN and both infinities are unusable
             return float("inf")
         return value
 
