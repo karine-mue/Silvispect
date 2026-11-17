@@ -165,12 +165,13 @@ class FittedModel:
         The range is closed: a height the curve attains at ``lower`` or
         ``upper`` inverts to that bound.
 
-        When ``upper`` is not given the search starts at 400 and, if the height
-        lies beyond the curve's value at the upper end, ``upper`` is doubled
-        (up to 51200) until the height is inside the range.  A height past the
-        curve's asymptote stays ``None``.  An explicit ``upper`` is never
-        widened, and a height outside the range on the ``lower`` side is never
-        widened for.
+        When ``upper`` is not given the search starts at 400 and, for an
+        increasing curve whose value at the upper end the height lies beyond,
+        ``upper`` is doubled (up to 51200) until the height is inside the
+        range.  A height past the curve's asymptote stays ``None``.  An
+        explicit ``upper`` is never widened, a decreasing curve is never
+        widened, and a height outside the range on the ``lower`` side is
+        never widened for.
 
         The supported families are monotone in diameter, so a bisection is both
         sufficient and robust.  Monotone, not necessarily *increasing*: least
@@ -190,8 +191,13 @@ class FittedModel:
             if widen:
                 while upper < 51200.0:
                     going_up = high_value >= low_value
-                    beyond = height_m > high_value if going_up else height_m < high_value
-                    if not beyond:
+                    # Widening exists for the tall-tree direction of an
+                    # increasing curve: a height just past the value at 400
+                    # would otherwise drop the stem from every summary.  A
+                    # decreasing curve is a fit artefact, and extending the
+                    # search along it manufactures diameters the data never
+                    # supported, so its range stays as given.
+                    if not going_up or height_m <= high_value:
                         break
                     upper *= 2.0
                     high_value = self.predict(upper)

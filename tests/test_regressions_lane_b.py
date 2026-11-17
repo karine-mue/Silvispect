@@ -154,9 +154,16 @@ def test_gaps_key_absent_without_chm():
 
 # --- #24: config validation ---------------------------------------------------------
 
-def test_from_dict_rejects_numeric_strings():
+def test_from_dict_parses_numeric_strings():
+    # Adjudicated against test_inspection.py's documented design: the
+    # parser door may read "0.8" from a profile file; what it may not do
+    # is leave a string stored in the field.  Non-numeric strings and
+    # bools are still refused.
+    assert InspectionConfig.from_dict({"min_recall": "0.8"}).min_recall == 0.8
     with pytest.raises(ValueError):
-        InspectionConfig.from_dict({"min_recall": "0.8"})
+        InspectionConfig.from_dict({"min_recall": "high"})
+    with pytest.raises(ValueError):
+        InspectionConfig.from_dict({"min_recall": True})
 
 
 def test_from_dict_accepts_numbers():

@@ -185,7 +185,7 @@ class InspectionConfig:
             raise ValueError(f"unknown configuration keys: {sorted(unknown)}")
         converted: dict[str, float | int] = {}
         for key, value in data.items():
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
                 raise ValueError(f"{key} must be a number, got {type(value).__name__}")
             number = float(value)
             if not math.isfinite(number):
@@ -727,7 +727,7 @@ class InspectionReport:
     detection: dict[str, object] | None = None
     match: dict[str, object] | None = None
     allometry: dict[str, object] | None = None
-    gaps: list[CanopyGap] | None = None
+    gaps: list[CanopyGap] = field(default_factory=list)
 
     @property
     def max_severity(self) -> Severity:
@@ -764,7 +764,11 @@ class InspectionReport:
             payload["match"] = self.match
         if self.allometry is not None:
             payload["allometry"] = self.allometry
-        if self.gaps is not None:
+        # The gaps block belongs to the canopy observations: it is present
+        # whenever the canopy was observed (the canopy summary is populated),
+        # even when no gap was found, and absent when nothing was observed —
+        # a measured zero is not a missing measurement.
+        if self.gaps or self.canopy:
             payload["gaps"] = [gap.as_dict() for gap in self.gaps]
         return payload
 
@@ -950,7 +954,7 @@ def inspect_stand(
         )
         if model is not None
         else None,
-        gaps=gaps if chm is not None else None,
+        gaps=gaps,
     )
 
 
