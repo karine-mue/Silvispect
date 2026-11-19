@@ -15,6 +15,7 @@ numbers such as ``-9999`` into a mean height.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,8 @@ from pathlib import Path
 __all__ = ["Grid", "GridError", "GridStats", "mean_of", "rms_of", "stdev_of", "sum_of"]
 
 NODATA_DEFAULT = -9999.0
+
+_CRS_PATTERN = re.compile(r"EPSG:[1-9][0-9]*")
 
 Cell = tuple[int, int]
 Value = float | None
@@ -142,6 +145,9 @@ class Grid:
         cellsize: Edge length of a cell in map units (metres by convention).
         nodata_value: Sentinel written for missing cells.
         values: Row-major cell values, ``None`` for nodata.
+        crs: Coordinate reference system as ``"EPSG:<code>"``, or ``None``
+            when unknown.  Preserved through GeoTIFF I/O; the ASCII format
+            cannot carry it, so it is lost across an ``.asc`` round trip.
     """
 
     ncols: int
@@ -151,6 +157,7 @@ class Grid:
     cellsize: float
     nodata_value: float = NODATA_DEFAULT
     values: list[Value] | None = None
+    crs: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         # The geometry is held to the same standard as the cells: everything
@@ -177,6 +184,15 @@ class Grid:
             raise GridError(f"expected {self.ncols * self.nrows} values, got {len(self.values)}")
         for value in self.values:
             _check_finite(value)
+        # The CRS is compared by plain string equality wherever it matters
+        # (alignment, the GeoTIFF writer), so it is held to one canonical
+        # spelling here: no lowercase, no whitespace, no normalisation.
+        if self.crs is not None and (
+            not isinstance(self.crs, str)
+            or _CRS_PATTERN.fullmatch(self.crs) is None
+            or not 1 <= int(self.crs[5:]) <= 32766
+        ):
+            raise GridError("crs must be None or 'EPSG:<code>'")
 
     # ------------------------------------------------------------------
     # construction
@@ -192,6 +208,7 @@ class Grid:
         xllcorner: float = 0.0,
         yllcorner: float = 0.0,
         nodata_value: float = NODATA_DEFAULT,
+        crs: str | None = None,
     ) -> Grid:
         """Return a grid of ``nrows`` x ``ncols`` cells all set to ``value``.
 
@@ -207,6 +224,7 @@ class Grid:
             cellsize=cellsize,
             nodata_value=nodata_value,
             values=[value] * (nrows * ncols),
+            crs=crs,
         )
 
     @classmethod
@@ -218,6 +236,7 @@ class Grid:
         xllcorner: float = 0.0,
         yllcorner: float = 0.0,
         nodata_value: float = NODATA_DEFAULT,
+        crs: str | None = None,
     ) -> Grid:
         """Build a grid from a sequence of equal-length rows (north row first).
 
@@ -247,6 +266,7 @@ class Grid:
             cellsize=cellsize,
             nodata_value=nodata_value,
             values=values,
+            crs=crs,
         )
 
     def like(self, value: Value = None) -> Grid:
@@ -259,6 +279,7 @@ class Grid:
             cellsize=self.cellsize,
             nodata_value=self.nodata_value,
             values=[value] * (self.ncols * self.nrows),
+            crs=self.crs,
         )
 
     def copy(self) -> Grid:
@@ -440,6 +461,10 @@ class Grid:
         """
         self.assert_aligned(other)
         out = self.like()
+        if self.crs is None and other.crs is not None:
+            # The result stands on both inputs; where only one of them
+            # knows its CRS, that knowledge is the result's.
+            out.crs = other.crs
         new_values = [
             None if (a is None or b is None) else fn(a, b)
             for a, b in zip(self.values, other.values, strict=True)
@@ -479,6 +504,12 @@ class Grid:
             or abs(self.yllcorner - other.yllcorner) > tolerance
         ):
             raise GridError("grids differ in origin")
+        # A CRS is only refused when both grids claim one and the claims
+        # disagree: an unknown CRS (None) asserts nothing about the
+        # coordinates, so it cannot contradict a known one.  The check is
+        # symmetric, as the geometry checks above are.
+        if self.crs is not None and other.crs is not None and self.crs != other.crs:
+            raise GridError("grids differ in CRS")
 
     def clip(self, minimum: float | None = None, maximum: float | None = None) -> Grid:
         """Clamp valid values into ``[minimum, maximum]``.
@@ -705,7 +736,7 @@ class Grid:
 
     @classmethod
     def read(cls, path: str | Path) -> Grid:
-        return cls.parse(Path(path).read_text(encoding="utf-8"))
+        return _codec_for(path)[0](cls, path)
 
     def to_text(self, *, precision: int | None = 3) -> str:
         """Serialise to an ESRI ASCII Grid document.
@@ -760,16 +791,75 @@ class Grid:
         return "\n".join(head + body) + "\n"
 
     def write(self, path: str | Path, *, precision: int | None = 3) -> Path:
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(self.to_text(precision=precision), encoding="utf-8")
-        return target
+        return _codec_for(path)[1](self, path, precision=precision)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return (
+        text = (
             f"Grid(nrows={self.nrows}, ncols={self.ncols}, "
-            f"cellsize={self.cellsize}, origin=({self.xllcorner}, {self.yllcorner}))"
+            f"cellsize={self.cellsize}, origin=({self.xllcorner}, {self.yllcorner})"
         )
+        if self.crs is not None:
+            text += f", crs={self.crs!r}"
+        return text + ")"
+
+
+def _read_ascii(cls: type[Grid], path: str | Path) -> Grid:
+    return cls.parse(Path(path).read_text(encoding="utf-8"))
+
+
+def _read_geotiff(cls: type[Grid], path: str | Path) -> Grid:
+    # Delayed import: the GeoTIFF codec imports Grid from here.
+    from silvispect.geotiff import read_geotiff
+
+    return read_geotiff(path)
+
+
+def _write_ascii(grid: Grid, path: str | Path, *, precision: int | None) -> Path:
+    # Serialise before touching the filesystem: a grid that cannot be
+    # written (a cell equal to the nodata sentinel, say) leaves nothing
+    # behind, not even the parent directory.
+    text = grid.to_text(precision=precision)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    return target
+
+
+def _write_geotiff(grid: Grid, path: str | Path, *, precision: int | None) -> Path:
+    # ``precision`` quantises ASCII output only; the GeoTIFF writer is
+    # always lossless, so the argument is ignored here.
+    from silvispect.geotiff import write_geotiff
+
+    write_geotiff(grid, path)
+    return Path(path)
+
+
+# The single dispatch table for raster formats.  Each extension maps to
+# its codec's (reader, writer) pair, so a future backend (rasterio/GDAL)
+# is swapped in by replacing the ``.tif`` / ``.tiff`` entries here, with
+# neither ``Grid.read`` nor ``Grid.write`` changing.
+_CODECS = {
+    ".asc": (_read_ascii, _write_ascii),
+    ".tif": (_read_geotiff, _write_geotiff),
+    ".tiff": (_read_geotiff, _write_geotiff),
+}
+
+
+def _codec_for(path: str | Path) -> tuple[Callable, Callable]:
+    """Return the (reader, writer) pair for ``path``'s extension.
+
+    Consulted before the filesystem is touched, so an unsupported
+    extension is refused with :class:`GridError` even for a path that does
+    not exist, and a refused write creates neither the file nor its parent
+    directory.
+    """
+    suffix = Path(path).suffix.lower()
+    try:
+        return _CODECS[suffix]
+    except KeyError:
+        raise GridError(
+            f"unsupported raster file extension {suffix!r}: expected .asc, .tif or .tiff"
+        ) from None
 
 
 def _median(values: Iterable[float]) -> float:

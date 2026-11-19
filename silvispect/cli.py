@@ -73,8 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     chm = subparsers.add_parser("chm", help="derive a canopy height model from DSM and DTM")
-    chm.add_argument("--dsm", required=True, type=Path, help="digital surface model (.asc)")
-    chm.add_argument("--dtm", required=True, type=Path, help="digital terrain model (.asc)")
+    chm.add_argument("--dsm", required=True, type=Path, help="digital surface model (.asc, .tif, .tiff)")
+    chm.add_argument("--dtm", required=True, type=Path, help="digital terrain model (.asc, .tif, .tiff)")
     chm.add_argument("-o", "--output", type=Path, help="write the canopy height model here")
     chm.add_argument(
         "--precision",
@@ -83,12 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="decimals to write; omit to write the shortest text that reads back as the "
         "same height, so the derived model is the one the analysis would have used. "
         "Any fixed number of decimals merges heights that differ below it into a "
-        "plateau, which moves the apexes the detector finds",
+        "plateau, which moves the apexes the detector finds. "
+        "Applies to .asc output only; GeoTIFF output is always lossless",
     )
     chm.set_defaults(handler=_cmd_chm)
 
     detect = subparsers.add_parser("detect", help="detect trees and delineate crowns")
-    detect.add_argument("chm", type=Path, help="canopy height model (.asc)")
+    detect.add_argument("chm", type=Path, help="canopy height model (.asc, .tif, .tiff)")
     detect.add_argument("--min-height", type=finite, default=2.0, help="minimum tree height")
     detect.add_argument("--smooth-radius", type=int, default=1, help="pre-smoothing radius")
     detect.add_argument("--window-intercept", type=finite, default=0.8)
@@ -123,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     match = subparsers.add_parser("match", help="compare detections with field trees")
     match.add_argument("inventory", type=Path, help="field tree list (.csv)")
-    match.add_argument("--chm", required=True, type=Path, help="canopy height model (.asc)")
+    match.add_argument("--chm", required=True, type=Path, help="canopy height model (.asc, .tif, .tiff)")
     match.add_argument("--tolerance", type=finite, default=2.5, help="matching radius in metres")
     match.add_argument("--json", action="store_true")
     match.set_defaults(handler=_cmd_match)
@@ -135,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     allometry.set_defaults(handler=_cmd_allometry)
 
     inspect_cmd = subparsers.add_parser("inspect", help="run the inspection rules")
-    inspect_cmd.add_argument("--chm", type=Path, help="canopy height model (.asc)")
+    inspect_cmd.add_argument("--chm", type=Path, help="canopy height model (.asc, .tif, .tiff)")
     inspect_cmd.add_argument("--inventory", type=Path, help="field tree list (.csv)")
     inspect_cmd.add_argument("--area-ha", type=finite, help="plot area, defaults to the raster")
     inspect_cmd.add_argument("--config", type=Path, help="threshold overrides (.json)")

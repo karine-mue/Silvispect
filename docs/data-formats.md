@@ -1,8 +1,9 @@
 # Data formats
 
-Silvispect reads and writes plain text only. Both formats are widely supported
-interchange formats, so data can move in and out of GIS and statistical
-software without a conversion step in the middle.
+Silvispect reads and writes rasters as ESRI ASCII Grid (`.asc`) and GeoTIFF
+(`.tif`, `.tiff`); inventories and profiles are plain text (CSV, JSON). All
+are widely supported interchange formats, so data can move in and out of GIS
+and statistical software without a conversion step in the middle.
 
 ## Rasters — ESRI ASCII Grid (`.asc`)
 
@@ -47,7 +48,10 @@ body are irrelevant — the parser reads tokens, not lines.
   input.
 - **Map units are assumed metric.** Areas are reported in m² and hectares.
 - A projected coordinate system is assumed; degrees will produce meaningless
-  areas and distances.
+  areas and distances. The format carries no CRS, so nothing can be checked:
+  a grid read from `.asc` has `crs = None`, and writing a grid that carries a
+  CRS to `.asc` drops it — no `.prj` sidecar is written. GeoTIFF (below) is
+  the format that preserves and validates the CRS.
 
 ### Reading and writing
 
@@ -67,6 +71,60 @@ coordinate conversion. Trailing zeros are trimmed on write to keep files small.
 
 Files produced by Silvispect are readable by GDAL (`AAIGrid` driver), QGIS,
 GRASS and R's `terra`.
+
+## Rasters — GeoTIFF (`.tif`, `.tiff`)
+
+`Grid.read` and `Grid.write` choose the format from the file extension,
+case-insensitively: `.asc` is ASCII Grid, `.tif` and `.tiff` are GeoTIFF.
+Any other extension — or none — is refused with a `GridError` before the
+file is touched, so an ASCII grid saved under a name like `chm.txt` is no
+longer read as a raster.
+
+### Reading
+
+Classic TIFF only, single band, stored as strips or tiles. Compression may
+be none, PackBits, or Deflate (codes 8 and 32946), with predictors 1, 2 and
+3. Sample formats are unsigned and signed integers of 8, 16, 32 or 64 bits,
+and IEEE floats of 32 or 64 bits. Anything outside that scope — LZW or JPEG
+compression, BigTIFF, multiple bands, a rotated or sheared raster, GDAL
+scale/offset metadata, sparse segments — is refused with a `GridError`
+naming the unsupported feature, never read approximately. Rasters over
+50,000,000 cells are refused before any memory is allocated.
+
+Georeferencing comes from ModelPixelScale + ModelTiepoint or from a
+ModelTransformationTag, and must be north-up with square cells. If a file
+carries no GeoTIFF georeferencing tags at all, a `.tfw` world file beside it
+is read instead; the world file must be axis-aligned (its rotation terms
+zero) and is interpreted on the pixel-centre convention. A file with only
+some of the GeoTIFF tags is corrupt, not a candidate for the fallback.
+
+### The CRS
+
+The CRS is **preserved and validated, never reprojected**. A projected CRS
+is kept on the grid as `Grid.crs`, the string `"EPSG:<code>"`, written back
+to the GeoKey directory on write, and carried through derived grids; two
+grids whose CRS values are both known and different refuse to combine. A
+geographic or geocentric coordinate system (degrees) is refused, as is a
+user-defined CRS (code 32767), which cannot be kept as an EPSG code. When a
+file states its linear unit it must be metres. Beyond that stated unit and
+a small list of known geographic codes, whether an EPSG code is a metric
+projected system is *not* verified — Silvispect carries no EPSG database,
+so an unusual code is trusted as written.
+
+### Writing
+
+Output is an uncompressed classic TIFF and is always lossless: float32 is
+written only when every cell value and the nodata sentinel are exactly
+representable in float32, and float64 otherwise, so a grid read back is the
+grid that was written, cell for cell. Values originating in a three-decimal
+`.asc` file are usually not float32-exact and are therefore written as
+float64 — still a valid GeoTIFF, though not the 32-bit form the Forestry
+Agency standard specifies; no quantising write option is offered, because
+one would break the rule that the same data analyses identically in either
+format. The nodata sentinel is always written as a `GDAL_NODATA` tag. The
+`precision` argument applies to `.asc` output only and is ignored for
+GeoTIFF. Files produced by Silvispect are readable by GDAL (the `GTiff`
+driver), QGIS, GRASS and R's `terra`.
 
 ## Inventories — CSV
 
