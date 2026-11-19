@@ -62,6 +62,8 @@ def ascii_map(
         raise ValueError("width must be positive")
     if len(ramp) < 2:
         raise ValueError("ramp needs at least two characters")
+    if not math.isfinite(aspect) or aspect <= 0:
+        raise ValueError(f"aspect must be positive, got {aspect!r}")
 
     cols = min(width, grid.ncols)
     col_step = grid.ncols / cols
@@ -74,6 +76,13 @@ def ascii_map(
     hi = stats.maximum if maximum is None else maximum
     if lo is None or hi is None:
         return "(empty raster)"
+    if not math.isfinite(lo) or not math.isfinite(hi):
+        # NaN defeats the order check below — every comparison against it
+        # is false — and reached the ramp indexing, where it surfaced as
+        # a bare "cannot convert float NaN to integer" from inside int().
+        raise ValueError(f"minimum and maximum must be finite, got {lo!r} and {hi!r}")
+    if hi < lo:
+        raise ValueError(f"maximum {hi!r} is below minimum {lo!r}")
     if math.isclose(hi, lo):
         hi = lo + 1.0
 
@@ -99,6 +108,8 @@ def ascii_map(
         canvas.append(line)
 
     for x, y, char in markers:
+        if not char:
+            continue
         cell = grid.cell_of(x, y)
         if cell is None:
             continue
@@ -259,6 +270,8 @@ def render_markdown(
                 f"({gap.centroid_x:.1f}, {gap.centroid_y:.1f}) | "
                 f"{'yes' if gap.touches_edge else 'no'} |"
             )
+        if len(report.gaps) > 20:
+            parts.append(f"Showing the 20 largest of {len(report.gaps)} gaps.")
         parts.append("")
 
     if report.detection:

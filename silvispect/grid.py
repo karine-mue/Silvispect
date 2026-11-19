@@ -150,7 +150,7 @@ class Grid:
     yllcorner: float
     cellsize: float
     nodata_value: float = NODATA_DEFAULT
-    values: list[Value] = field(default_factory=list)
+    values: list[Value] | None = None
 
     def __post_init__(self) -> None:
         # The geometry is held to the same standard as the cells: everything
@@ -171,10 +171,12 @@ class Grid:
             raise GridError("grid must have a positive number of rows and columns")
         if self.cellsize <= 0:
             raise GridError("cellsize must be positive")
-        if not self.values:
+        if self.values is None:
             self.values = [None] * (self.ncols * self.nrows)
         if len(self.values) != self.ncols * self.nrows:
             raise GridError(f"expected {self.ncols * self.nrows} values, got {len(self.values)}")
+        for value in self.values:
+            _check_finite(value)
 
     # ------------------------------------------------------------------
     # construction
@@ -320,9 +322,21 @@ class Grid:
         return (x, y)
 
     def cell_of(self, x: float, y: float) -> Cell | None:
-        """Return the cell containing map coordinate ``(x, y)`` or ``None``."""
+        """Return the cell containing map coordinate ``(x, y)`` or ``None``.
+
+        The far edges belong to the edge cells: the extent is inclusive
+        (SV043 judges coordinates against it), so a point exactly on the
+        east or south edge lies in the last column or row.  Floor
+        arithmetic alone put it one cell past the grid, and a stem there
+        vanished — counted neither as observed nor as outside.
+        """
         col = math.floor((x - self.xllcorner) / self.cellsize)
         row = math.floor((self.yllcorner + self.nrows * self.cellsize - y) / self.cellsize)
+        _, ymin, xmax, _ = self.extent
+        if col == self.ncols and x == xmax:
+            col = self.ncols - 1
+        if row == self.nrows and y == ymin:
+            row = self.nrows - 1
         if not self.in_bounds(row, col):
             return None
         return (row, col)
@@ -334,6 +348,7 @@ class Grid:
         return self.values[self.index(row, col)]
 
     def set(self, row: int, col: int, value: Value) -> None:
+        _check_finite(value)
         self.values[self.index(row, col)] = value
 
     def __getitem__(self, cell: Cell) -> Value:
@@ -412,7 +427,10 @@ class Grid:
     def map_values(self, fn: Callable[[float], Value]) -> Grid:
         """Apply ``fn`` to every valid cell, leaving nodata untouched."""
         out = self.like()
-        out.values = [None if v is None else fn(v) for v in self.values]
+        new_values = [None if v is None else fn(v) for v in self.values]
+        for value in new_values:
+            _check_finite(value)
+        out.values = new_values
         return out
 
     def combine(self, other: Grid, fn: Callable[[float, float], Value]) -> Grid:
@@ -422,10 +440,13 @@ class Grid:
         """
         self.assert_aligned(other)
         out = self.like()
-        out.values = [
+        new_values = [
             None if (a is None or b is None) else fn(a, b)
             for a, b in zip(self.values, other.values, strict=True)
         ]
+        for value in new_values:
+            _check_finite(value)
+        out.values = new_values
         return out
 
     def assert_aligned(self, other: Grid) -> None:
@@ -483,6 +504,7 @@ class Grid:
         return self.map_values(_clip)
 
     def replace_nodata(self, value: float) -> Grid:
+        _check_finite(value)
         out = self.like()
         out.values = [value if v is None else v for v in self.values]
         return out
@@ -509,7 +531,9 @@ class Grid:
             valid = [v for v in sample if v is not None]
             if len(valid) < min_valid:
                 continue
-            out.values[row * self.ncols + col] = fn(valid)
+            result = fn(valid)
+            _check_finite(result)
+            out.values[row * self.ncols + col] = result
         return out
 
     def smooth_mean(self, radius: int = 1) -> Grid:
@@ -539,13 +563,27 @@ class Grid:
     def histogram(self, bins: int = 10, lo: float | None = None, hi: float | None = None):
         """Return ``(edges, counts)`` for the valid values of the grid."""
         values = list(self.finite_values())
+        if isinstance(bins, bool) or bins != int(bins):
+            raise GridError("bins must be a whole number")
+        bins = int(bins)
         if bins <= 0:
             raise GridError("bins must be positive")
         if not values:
             return ([], [])
         lo = min(values) if lo is None else lo
         hi = max(values) if hi is None else hi
-        if math.isclose(hi, lo):
+        if not math.isfinite(lo) or not math.isfinite(hi):
+            raise GridError(
+                f"histogram bounds must be finite numbers, got lo={lo!r} and hi={hi!r}"
+            )
+        if lo > hi:
+            raise GridError("histogram lower bound must not exceed upper bound")
+        if hi == lo:
+            # A single repeated value still gets a range to bin into.  Only
+            # exact equality widens: judging "close enough" here used to run
+            # before the order check, so a reversed range a hair wide was
+            # silently rewritten into a different histogram instead of
+            # refused as the reversed range it is.
             hi = lo + 1.0
         width = (hi - lo) / bins
         counts = [0] * bins
@@ -563,6 +601,8 @@ class Grid:
     @classmethod
     def parse(cls, text: str) -> Grid:
         """Parse an ESRI ASCII Grid document."""
+        if text.startswith("\ufeff"):
+            text = text[1:]
         header: dict[str, float] = {}
         tokens: list[str] = []
         lines = text.splitlines()
@@ -587,6 +627,8 @@ class Grid:
                 break
             if len(parts) < 2:
                 raise GridError(f"header line {cursor + 1} has no value")
+            if len(parts) > 2:
+                raise GridError(f"header line {cursor + 1} has extra tokens")
             # Repeating a field is not a correction: the reader cannot know
             # which of the two the writer meant, and keeping the last silently
             # threw the first away.  "ncols 5" followed by "ncols 50" read a
@@ -676,21 +718,45 @@ class Grid:
         canopy surface.  Choosing a *larger* fixed precision only moves the
         magnitude at which that happens.
         """
+        # The header states the geometry, not measurements: rounding it with
+        # the cell precision rewrites the raster's extent (a cellsize of
+        # 0.125 written at two decimals came back as 0.12, and 0.5 at zero
+        # decimals as an unreadable 0).  Header fields are written so they
+        # read back exactly; only the cell values are quantised.
         head = [
             f"ncols {self.ncols}",
             f"nrows {self.nrows}",
-            f"xllcorner {_fmt(self.xllcorner, precision)}",
-            f"yllcorner {_fmt(self.yllcorner, precision)}",
-            f"cellsize {_fmt(self.cellsize, precision)}",
-            f"NODATA_value {_fmt(self.nodata_value, precision)}",
+            f"xllcorner {_fmt(self.xllcorner, None)}",
+            f"yllcorner {_fmt(self.yllcorner, None)}",
+            f"cellsize {_fmt(self.cellsize, None)}",
+            f"NODATA_value {_fmt(self.nodata_value, None)}",
         ]
+
+        def fmt_cell(value: Value) -> str:
+            if value is None:
+                # Absence is written as the sentinel exactly as the header
+                # states it, never at cell precision: rounding the sentinel
+                # with the cells turns it into a different number, which the
+                # reader then takes for a measurement — a nodata of
+                # -9999.1234 written at two decimals came back as the valid
+                # height -9999.12, and the missing cell was resurrected.
+                return _fmt(self.nodata_value, None)
+            token = _fmt(value, precision)
+            if float(token) == self.nodata_value:
+                # The cell holds a measurement the reader would take for
+                # absence: written, it would come back as nodata.  Refuse,
+                # rather than let a round trip delete a measured cell.
+                raise GridError(
+                    f"cell value {value!r} would be written as the nodata value "
+                    f"{self.nodata_value!r} and read back as missing"
+                )
+            return token
+
         body = []
         for row in range(self.nrows):
             start = row * self.ncols
             chunk = self.values[start : start + self.ncols]
-            body.append(
-                " ".join(_fmt(self.nodata_value if v is None else v, precision) for v in chunk)
-            )
+            body.append(" ".join(fmt_cell(v) for v in chunk))
         return "\n".join(head + body) + "\n"
 
     def write(self, path: str | Path, *, precision: int | None = 3) -> Path:
@@ -712,7 +778,7 @@ def _median(values: Iterable[float]) -> float:
     mid = n // 2
     if n % 2:
         return ordered[mid]
-    return (ordered[mid - 1] + ordered[mid]) / 2.0
+    return ordered[mid - 1] / 2.0 + ordered[mid] / 2.0
 
 
 def _fmt(value: float, precision: int | None) -> str:

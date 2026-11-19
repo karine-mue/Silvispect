@@ -66,7 +66,13 @@ def test_parse_generates_ids_when_absent():
 
 
 def test_parse_empty_document():
-    assert parse_trees("") == []
+    # A document with no header at all is not an empty inventory: the
+    # empty inventory is a header with no rows under it.  Accepting the
+    # former made a missing or truncated file indistinguishable from a
+    # plot that was counted and found empty.
+    with pytest.raises(InventoryError, match="no header"):
+        parse_trees("")
+    assert parse_trees("tree_id,x,y\n") == []
 
 
 def test_parse_requires_coordinates():

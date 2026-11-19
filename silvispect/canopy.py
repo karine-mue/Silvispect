@@ -327,6 +327,10 @@ def find_gaps(
     Returns:
         Gaps sorted by descending area.
     """
+    if not math.isfinite(min_area):
+        raise GridError(f"min_area must be a finite number, got {min_area!r}")
+    if not math.isfinite(min_width):
+        raise GridError(f"min_width must be a finite number, got {min_width!r}")
     if min_area < 0:
         raise GridError("min_area must be non-negative")
     if min_width < 0:
@@ -376,9 +380,20 @@ def find_gaps(
         touches_edge = any(reaches_border[r * chm.ncols + c] for r, c in members)
         if touches_edge and not include_edge_gaps:
             continue
-        # The largest circle that fits inside the open ground with its centre
-        # in this gap's cells, found exactly rather than read off cell centres.
-        circle = inscribed_circle(walls, cells, [r * chm.ncols + c for r, c in members])
+        # The largest circle that fits inside this gap's own cells, with its
+        # centre in them, found exactly rather than read off cell centres.  It
+        # is measured with every cell outside the component blocked: against
+        # the shared walls a circle could spill through a narrow neck into a
+        # neighbouring component and report a width the component does not have.
+        indices = [r * chm.ncols + c for r, c in members]
+        member_set = set(indices)
+        component_walls = Walls(
+            [index not in member_set for index in range(len(chm.values))],
+            chm.nrows,
+            chm.ncols,
+        )
+        component_cells = distance_field(component_walls.blocked, chm.nrows, chm.ncols)
+        circle = inscribed_circle(component_walls, component_cells, indices)
         inscribed = circle.radius * chm.cellsize
         xs, ys = zip(*(chm.cell_center(r, c) for r, c in members), strict=True)
         gaps.append(
@@ -434,12 +449,12 @@ def gap_fraction(chm: Grid, *, threshold: float = 2.0) -> float:
 
 
 def rugosity(chm: Grid, *, threshold: float = 0.0) -> float:
-    """Standard deviation of canopy heights above ``threshold``.
+    """Standard deviation of canopy heights at or above ``threshold``.
 
     Canopy rugosity is a compact proxy for vertical structural complexity:
     even-aged plantations score low, multi-layered stands score high.
     """
-    heights = [h for _, _, h in chm.valid_cells() if h > threshold]
+    heights = [h for _, _, h in chm.valid_cells() if h >= threshold]
     if len(heights) < 2:
         return 0.0
     return stdev_of(heights)

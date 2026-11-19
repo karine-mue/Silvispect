@@ -21,7 +21,7 @@ from .allometry import DEFAULT_MODEL, MODELS, AllometryError, fit_height_diamete
 from .canopy import canopy_cover, canopy_height_model, find_gaps, gap_fraction
 from .detect import DetectionConfig, detect_trees
 from .grid import Grid, GridError
-from .inspection import InspectionConfig, Severity, inspect_stand
+from .inspection import InspectionConfig, Severity, _observed_trees, inspect_stand
 from .inventory import InventoryError, match_trees, read_trees, trees_from_crowns, write_trees
 from .metrics import stand_metrics
 from .report import ascii_map, crown_markers, render_json, render_markdown, render_text
@@ -48,6 +48,22 @@ def finite(text: str) -> float:
     return value
 
 
+def non_negative_int(text: str) -> int:
+    """An argparse type for counts that cannot be negative.
+
+    A negative ``--precision`` travelled into the number formatter and came
+    back as a raw ``ValueError`` about format specifiers; as a usage error
+    it is reported by argparse itself, with the option named.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an integer") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"value must not be negative, got {value}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="silvispect",
@@ -62,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     chm.add_argument("-o", "--output", type=Path, help="write the canopy height model here")
     chm.add_argument(
         "--precision",
-        type=int,
+        type=non_negative_int,
         default=None,
         help="decimals to write; omit to write the shortest text that reads back as the "
         "same height, so the derived model is the one the analysis would have used. "
@@ -270,6 +286,10 @@ def _cmd_render(args: argparse.Namespace, out) -> int:
 def _cmd_match(args: argparse.Namespace, out) -> int:
     chm = Grid.read(args.chm)
     reference = read_trees(args.inventory)
+    # Recall is measured against the stems the raster can speak for, as in
+    # inspect_stand: a stem on an unobserved cell or outside the grid is
+    # not a detection the tool missed.
+    reference = _observed_trees(chm, reference)
     result = detect_trees(chm)
     match = match_trees(result.crowns, reference, tolerance=args.tolerance)
     if args.json:
@@ -381,6 +401,11 @@ def main(argv: Sequence[str] | None = None, *, out=None) -> int:
         return EXIT_ERROR
     except FileNotFoundError as exc:
         print(f"silvispect: {exc.filename}: file not found", file=sys.stderr)
+        return EXIT_ERROR
+    except OSError as exc:
+        # Other OS-level input failures (a directory passed as a file, a
+        # permission refusal) are usage errors too, not tracebacks.
+        print(f"silvispect: {exc}", file=sys.stderr)
         return EXIT_ERROR
     except BrokenPipeError:
         # A downstream reader such as `head` closed the pipe.  Redirect stdout

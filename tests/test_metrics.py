@@ -95,8 +95,13 @@ def test_species_diversity():
     assert species_composition([]) == {}
 
 
-def test_species_composition_labels_blanks():
-    assert species_composition([tree("a", 20.0, 15.0, "")]) == {"UNKNOWN": 1.0}
+def test_species_composition_ignores_blanks():
+    # Unlabelled stems are not a species: pooling them as "UNKNOWN" made
+    # a stand with no species data look like a single-species stand to
+    # the diversity indices and the dominance rule.
+    assert species_composition([tree("a", 20.0, 15.0, "")]) == {}
+    labelled = [tree("a", 20.0, 15.0, ""), tree("b", 20.0, 15.0, "PIAB")]
+    assert species_composition(labelled) == {"PIAB": 1.0}
 
 
 def test_diameter_distribution():

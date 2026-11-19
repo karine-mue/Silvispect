@@ -19,13 +19,14 @@ from pathlib import Path
 from .allometry import (
     DEFAULT_MODEL,
     FittedModel,
+    _leave_one_out_z,
     default_model,
     fit_by_species,
     residual_scores,
 )
 from .canopy import CanopyGap, canopy_cover, find_gaps, gap_fraction, rugosity, vertical_strata
 from .detect import Crown, DetectionConfig, DetectionResult, detect_trees
-from .grid import Grid, mean_of, stdev_of
+from .grid import Grid, mean_of
 from .inventory import MatchResult, Tree, match_trees, trees_from_crowns
 from .metrics import StandMetrics, stand_metrics
 
@@ -160,6 +161,8 @@ class InspectionConfig:
         for name, value in asdict(self).items():
             if isinstance(value, (int, float)) and value < 0:
                 raise ValueError(f"{name} must not be negative, got {value}")
+        if self.match_tolerance_m <= 0:
+            raise ValueError(f"match_tolerance_m must be greater than 0, got {self.match_tolerance_m}")
         for low, high in (
             ("min_stems_per_ha", "max_stems_per_ha"),
             ("min_sdi", "max_sdi"),
@@ -485,18 +488,18 @@ def check_species_diversity(ctx: InspectionContext) -> Iterable[Finding]:
         )
     shares = ctx.metrics.species_shares
     if shares:
-        species, share = next(iter(shares.items()))
-        if share > ctx.config.max_species_share:
-            shown, limit = _compared(share, ctx.config.max_species_share, "0%")
-            yield Finding(
-                "SV022",
-                Severity.NOTICE,
-                "Single-species dominance",
-                f"{species} accounts for {shown} of stems, above the {limit} limit.",
-                subject=f"species:{species}",
-                value=share,
-                threshold=ctx.config.max_species_share,
-            )
+        for species, share in shares.items():
+            if share > ctx.config.max_species_share:
+                shown, limit = _compared(share, ctx.config.max_species_share, "0%")
+                yield Finding(
+                    "SV022",
+                    Severity.NOTICE,
+                    "Single-species dominance",
+                    f"{species} accounts for {shown} of stems, above the {limit} limit.",
+                    subject=f"species:{species}",
+                    value=share,
+                    threshold=ctx.config.max_species_share,
+                )
 
 
 # ----------------------------------------------------------------------
@@ -521,7 +524,7 @@ def check_height_anomalies(ctx: InspectionContext) -> Iterable[Finding]:
             # sitting exactly on it is not an outlier.
             if abs(z) <= ctx.config.height_residual_z:
                 continue
-            direction = "taller" if residual > 0 else "shorter"
+            direction = "taller" if z > 0 else "shorter"
             yield Finding(
                 "SV030",
                 Severity.WARNING if abs(z) >= ctx.config.height_residual_z + 1 else Severity.NOTICE,
@@ -540,17 +543,16 @@ def check_dbh_outliers(ctx: InspectionContext) -> Iterable[Finding]:
     """SV031 — diameters far outside the plot's own distribution."""
     if not ctx.has_field_data:
         return
-    diameters = [tree.dbh_cm for tree in ctx.field_trees or [] if tree.dbh_cm and tree.dbh_cm > 0]
+    live: list[Tree] = []
+    diameters: list[float] = []
+    for tree in ctx.field_trees or []:
+        if tree.is_live and tree.dbh_cm and tree.dbh_cm > 0:
+            live.append(tree)
+            diameters.append(tree.dbh_cm)
     if len(diameters) < 5:
         return
     mean = mean_of(diameters)
-    stdev = stdev_of(diameters, mean)
-    if stdev == 0:
-        return
-    for tree in ctx.field_trees or []:
-        if not tree.dbh_cm or tree.dbh_cm <= 0:
-            continue
-        z = (tree.dbh_cm - mean) / stdev
+    for tree, z in zip(live, _leave_one_out_z(diameters), strict=True):
         # "More than" the threshold, so equality is not an outlier.
         if abs(z) <= ctx.config.dbh_outlier_z:
             continue
@@ -762,7 +764,11 @@ class InspectionReport:
             payload["match"] = self.match
         if self.allometry is not None:
             payload["allometry"] = self.allometry
-        if self.gaps:
+        # The gaps block belongs to the canopy observations: it is present
+        # whenever the canopy was observed (the canopy summary is populated),
+        # even when no gap was found, and absent when nothing was observed —
+        # a measured zero is not a missing measurement.
+        if self.gaps or self.canopy:
             payload["gaps"] = [gap.as_dict() for gap in self.gaps]
         return payload
 
@@ -913,12 +919,20 @@ def inspect_stand(
         canopy_summary = {
             "cover": round(canopy_cover(chm, config.canopy_threshold), 4),
             "gap_fraction": round(gap_fraction(chm, threshold=config.canopy_threshold), 4),
-            "rugosity_m": round(rugosity(chm, threshold=config.canopy_threshold), 3),
+            "rugosity_m": round(rugosity(chm), 3),
             "mean_height_m": _round(stats.mean, 3),
             "max_height_m": _round(stats.maximum, 3),
             "strata": {k: round(v, 4) for k, v in vertical_strata(chm).items()},
             "gap_count": len(gaps),
         }
+
+    # The detection density is stated over the plot area the inspection was
+    # run with, not the raster footprint: the two differ whenever the caller
+    # supplies --area-ha, and the report's own area_ha is the former.
+    detection_payload: dict[str, object] | None = None
+    if detection is not None:
+        detection_payload = detection.as_dict()
+        detection_payload["density_per_ha"] = round(detection.density_per_ha(area_ha), 2)
 
     return InspectionReport(
         findings=findings,
@@ -927,7 +941,7 @@ def inspect_stand(
         config=config,
         area_ha=area_ha,
         canopy=canopy_summary,
-        detection=detection.as_dict() if detection is not None else None,
+        detection=detection_payload,
         match=match.as_dict() if match is not None else None,
         allometry=(
             model.as_dict()

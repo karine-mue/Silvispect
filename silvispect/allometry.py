@@ -56,6 +56,8 @@ class ModelSpec:
 def _curtis(dbh: float, p: Sequence[float]) -> float:
     if dbh <= 0:
         return BREAST_HEIGHT
+    if p[0] <= 0 or p[1] <= 0:
+        raise ValueError("invalid Curtis parameters")
     return BREAST_HEIGHT + p[0] * (dbh / (1.0 + dbh)) ** p[1]
 
 
@@ -155,11 +157,21 @@ class FittedModel:
         """Predict total height in metres for a diameter in centimetres."""
         return self.spec.evaluate(dbh_cm, self.params)
 
-    def invert(self, height_m: float, *, lower: float = 0.1, upper: float = 400.0) -> float | None:
+    def invert(
+        self, height_m: float, *, lower: float = 0.1, upper: float | None = None
+    ) -> float | None:
         """Back out the diameter implied by a height, or ``None`` if outside range.
 
         The range is closed: a height the curve attains at ``lower`` or
         ``upper`` inverts to that bound.
+
+        When ``upper`` is not given the search starts at 400 and, for an
+        increasing curve whose value at the upper end the height lies beyond,
+        ``upper`` is doubled (up to 51200) until the height is inside the
+        range.  A height past the curve's asymptote stays ``None``.  An
+        explicit ``upper`` is never widened, a decreasing curve is never
+        widened, and a height outside the range on the ``lower`` side is
+        never widened for.
 
         The supported families are monotone in diameter, so a bisection is both
         sufficient and robust.  Monotone, not necessarily *increasing*: least
@@ -170,9 +182,32 @@ class FittedModel:
         fitter had just returned could not be read backwards at all.  Which way
         the curve runs is read off its own endpoints instead.
         """
+        if not math.isfinite(height_m):
+            # A non-finite height is outside every range.  Without the
+            # check, NaN fell through it instead: every comparison against
+            # NaN is false, so the widening loop, the range test and the
+            # bisection all waved it past and the search returned the
+            # lower bound as if it were an answer.
+            return None
+        widen = upper is None
+        if upper is None:
+            upper = 400.0
         try:
             low_value = self.predict(lower)
             high_value = self.predict(upper)
+            if widen:
+                while upper < 51200.0:
+                    going_up = high_value >= low_value
+                    # Widening exists for the tall-tree direction of an
+                    # increasing curve: a height just past the value at 400
+                    # would otherwise drop the stem from every summary.  A
+                    # decreasing curve is a fit artefact, and extending the
+                    # search along it manufactures diameters the data never
+                    # supported, so its range stays as given.
+                    if not going_up or height_m <= high_value:
+                        break
+                    upper *= 2.0
+                    high_value = self.predict(upper)
         except ValueError:  # pragma: no cover - guarded by fit validation
             return None
         # A height the curve reaches exactly at an endpoint is in range, and
@@ -317,7 +352,11 @@ def fit_by_species(
     try:
         models[""] = fit_height_diameter(trees, model=model, min_points=min_points)
     except AllometryError:
-        dominant = max(sorted(groups), key=lambda code: len(groups[code])) if groups else ""
+        dominant = (
+            max(sorted(groups), key=lambda code: len(paired_measurements(groups[code])))
+            if groups
+            else ""
+        )
         models[""] = default_model(dominant)
 
     for code, members in groups.items():
@@ -356,16 +395,22 @@ def default_model(species: str = "", *, model: str = DEFAULT_MODEL) -> FittedMod
 
 
 def residual_scores(model: FittedModel, trees: Sequence[Tree]) -> list[tuple[Tree, float, float]]:
-    """Return ``(tree, residual, z_score)`` for every tree with both dimensions.
+    """Return ``(tree, residual, z_score)`` for every live tree with both dimensions.
 
-    The z-score uses the standard deviation of the residuals themselves, so it
-    measures departure from the stand's own curve rather than from an external
-    expectation.
+    Dead trees are not scored.  The z-score is leave-one-out: each residual is
+    compared with the mean and unbiased standard deviation of the *other*
+    residuals, so a single outlier cannot inflate the spread it is judged
+    against.  It measures departure from the stand's own curve rather than from
+    an external expectation.  With fewer than three trees every score is zero.
     """
     usable = [
         tree
         for tree in trees
-        if tree.dbh_cm and tree.height_m and tree.dbh_cm > 0 and tree.height_m > 0
+        if tree.is_live
+        and tree.dbh_cm
+        and tree.height_m
+        and tree.dbh_cm > 0
+        and tree.height_m > 0
     ]
     if not usable:
         return []
@@ -374,18 +419,36 @@ def residual_scores(model: FittedModel, trees: Sequence[Tree]) -> list[tuple[Tre
         for tree in usable
         if tree.height_m is not None and tree.dbh_cm is not None
     ]
-    n = len(residuals)
-    mean = sum(residuals) / n
-    if n > 1:
-        variance = sum((r - mean) ** 2 for r in residuals) / (n - 1)
-        stdev = math.sqrt(variance)
-    else:
-        stdev = 0.0
+    scores = _leave_one_out_z(residuals)
     scored: list[tuple[Tree, float, float]] = []
-    for tree, residual in zip(usable, residuals, strict=True):
-        z = 0.0 if stdev == 0 else (residual - mean) / stdev
+    for tree, residual, z in zip(usable, residuals, scores, strict=True):
         scored.append((tree, residual, z))
     return scored
+
+
+def _leave_one_out_z(values: Sequence[float]) -> list[float]:
+    """Leave-one-out z-scores: each value against the mean and sd of the others.
+
+    Fewer than three values give all zeros.  When the others have no spread, a
+    value equal to their mean scores ``0.0`` and any other value scores a signed
+    infinity.
+    """
+    items = list(values)
+    count = len(items)
+    if count < 3:
+        return [0.0] * count
+    scores: list[float] = []
+    for index, value in enumerate(items):
+        others = items[:index] + items[index + 1 :]
+        mean = sum(others) / len(others)
+        variance = sum((other - mean) ** 2 for other in others) / (len(others) - 1)
+        stdev = math.sqrt(variance)
+        deviation = value - mean
+        if stdev == 0:
+            scores.append(0.0 if deviation == 0 else math.copysign(math.inf, deviation))
+        else:
+            scores.append(deviation / stdev)
+    return scores
 
 
 def _finite(value: float, digits: int = 4) -> float | None:
@@ -404,6 +467,6 @@ def _as_pairs(data: Sequence[Tree] | Sequence[tuple[float, float]]) -> list[tupl
     pairs: list[tuple[float, float]] = []
     for item in data:
         dbh, height = item  # type: ignore[misc]
-        if dbh > 0 and height > 0:
+        if dbh > 0 and height > 0 and math.isfinite(dbh) and math.isfinite(height):
             pairs.append((float(dbh), float(height)))
     return pairs

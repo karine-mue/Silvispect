@@ -69,6 +69,41 @@ class SynthConfig:
     yllcorner: float = 0.0
 
     def __post_init__(self) -> None:
+        # Every magnitude check below is a comparison, and a comparison
+        # against NaN is always false: a width of NaN and a density of inf
+        # walked past checks written as ``<= 0`` and ``< 0`` and produced a
+        # configuration object no stand could be generated from.  Finiteness
+        # is therefore established first, for every float the stand is
+        # built from.
+        for name in (
+            "width",
+            "height",
+            "cellsize",
+            "stems_per_ha",
+            "dbh_log_mean",
+            "dbh_log_sigma",
+            "dbh_min",
+            "dbh_max",
+            "height_noise",
+            "crown_intercept",
+            "crown_slope",
+            "surface_noise",
+            "terrain_slope",
+            "terrain_relief",
+            "xllcorner",
+            "yllcorner",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
+        for weight in self.species_weights:
+            if not math.isfinite(weight):
+                raise ValueError(
+                    f"species_weights must be finite numbers, got {weight!r}"
+                )
+        for radius in self.gap_radius:
+            if not math.isfinite(radius):
+                raise ValueError(f"gap_radius must be finite numbers, got {radius!r}")
         if self.width <= 0 or self.height <= 0:
             raise ValueError("stand extent must be positive")
         if self.cellsize <= 0:
@@ -79,6 +114,22 @@ class SynthConfig:
             raise ValueError("at least one species is required")
         if self.stems_per_ha < 0:
             raise ValueError("stems_per_ha must be non-negative")
+        if self.dbh_min <= 0 or self.dbh_min > self.dbh_max:
+            raise ValueError("dbh range must satisfy 0 < dbh_min <= dbh_max")
+        if any(w < 0 for w in self.species_weights) or not any(
+            w > 0 for w in self.species_weights
+        ):
+            raise ValueError(
+                "species_weights must be non-negative with at least one positive value"
+            )
+        if self.surface_noise < 0 or self.height_noise < 0:
+            raise ValueError("surface_noise and height_noise must be non-negative")
+        if not 0 <= self.gap_radius[0] <= self.gap_radius[1]:
+            raise ValueError("gap_radius must satisfy 0 <= gap_radius[0] <= gap_radius[1]")
+        if isinstance(self.gap_count, bool) or not isinstance(self.gap_count, int):
+            raise ValueError("gap_count must be an integer")
+        if self.gap_count < 0:
+            raise ValueError("gap_count must be non-negative")
 
     @property
     def shape(self) -> tuple[int, int]:

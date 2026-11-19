@@ -85,6 +85,10 @@ class DetectionConfig:
             raise GridError("drop_fraction must be in [0, 1)")
         if self.window_intercept <= 0 or self.crown_intercept <= 0:
             raise GridError("window and crown intercepts must be positive")
+        if self.window_slope < 0:
+            raise GridError("window_slope must be non-negative")
+        if self.crown_slope < 0:
+            raise GridError("crown_slope must be non-negative")
         if self.min_crown_cells < 1:
             raise GridError("min_crown_cells must be at least 1")
 
@@ -241,9 +245,12 @@ def find_treetops(
     for row, col, height in chm.valid_cells():
         if height < config.min_height:
             continue
-        radius_cells = max(1, round(window_radius(height, config) / chm.cellsize))
+        radius_m = window_radius(height, config)
+        radius_cells = max(1, math.ceil(radius_m / chm.cellsize))
         if any(
-            (other := chm.values[nrow * chm.ncols + ncol]) is not None and other > height
+            (other := chm.values[nrow * chm.ncols + ncol]) is not None
+            and other > height
+            and math.hypot(nrow - row, ncol - col) * chm.cellsize <= radius_m
             for nrow, ncol in chm.window(row, col, radius_cells, circular=True)
         ):
             continue
@@ -471,12 +478,15 @@ def segment_crowns(
             value = chm.values[idx]
             if value is None or value < floor:
                 continue
-            if value > parent_height and not math.isclose(value, parent_height, rel_tol=1e-9):
-                # Rising again: we have crossed into a neighbouring crown.  The
-                # allowance is relative because a canopy has no privileged
-                # unit: a fixed 1e-9 m swallowed a rise of 5e-10 m and then
-                # rejected the same forest measured in decimetres, so the crown
-                # gained or lost a cell according to the scale of the numbers.
+            if value > parent_height and value > apex.height:
+                # Rising again, above the apex itself: we have crossed into
+                # a neighbouring crown.  A hair's rise *below* the apex is
+                # still this crown's own surface, and judging that allowance
+                # against the apex rather than the parent is what keeps it
+                # honest: a parent-relative tolerance re-based itself at
+                # every accepted step, so a staircase of micro-rises, each
+                # within tolerance of the last, could be climbed without
+                # limit.  Against the apex it cannot compound.
                 continue
             reach = (nrow - apex.row) ** 2 + (ncol - apex.col) ** 2
             if math.sqrt(reach) * chm.cellsize > limit:
@@ -526,6 +536,12 @@ def segment_crowns(
         )
 
     label_grid = chm.like()
+    # The labels are positive integers and absence is ``None``, so the
+    # sentinel is 0 — a value no crown can own.  Inheriting the CHM's
+    # sentinel instead let a canopy model whose nodata is 1.0 collide with
+    # tree_id 1, and the writer refused the label raster outright: the
+    # detection had succeeded and its labels could not be written down.
+    label_grid.nodata_value = 0.0
     for position, label in enumerate(labels):
         if label in kept_labels:
             label_grid.values[position] = float(remap[label])

@@ -149,14 +149,17 @@ def lorey_height(trees: Sequence[Tree]) -> float | None:
 
 def dominant_height(trees: Sequence[Tree], area_ha: float) -> float | None:
     """Mean height of the 100 thickest stems per hectare ("top height")."""
-    if area_ha <= 0:
+    if not math.isfinite(area_ha) or area_ha <= 0:
         raise MetricsError("area_ha must be positive")
     candidates = [
         tree for tree in _measured(trees) if tree.height_m is not None and tree.height_m > 0
     ]
     if not candidates:
         return None
-    count = max(1, min(len(candidates), round(100 * area_ha)))
+    # The stem count is a number of trees, so a fractional hectare share is
+    # rounded half up: Python's round() rounds half to even and would keep
+    # only 12 of the 12.5 stems a 0.125 ha plot represents.
+    count = max(1, min(len(candidates), math.floor(100 * area_ha + 0.5)))
     # Ties at the cutoff must not be settled by inventory row order: two 30 cm
     # stems of 10 m and 30 m gave whichever height happened to be listed first.
     # Rank by diameter, then height, then identifier — all properties of the
@@ -212,8 +215,15 @@ def gini_coefficient(values: Sequence[float]) -> float | None:
 
 
 def species_composition(trees: Sequence[Tree]) -> dict[str, float]:
-    """Proportion of stems per species code, descending by share."""
-    labelled = [tree.species.strip().upper() or "UNKNOWN" for tree in trees]
+    """Proportion of stems per species code, descending by share.
+
+    Stems with no species recorded are excluded rather than pooled into a
+    synthetic "UNKNOWN" species: pooling them made a stand of unlabelled
+    stems look like a single-species stand to the diversity indices and to
+    the dominance rule.  With no labelled stems at all the composition is
+    empty and the diversity indices are unknown, not zero.
+    """
+    labelled = [tree.species.strip().upper() for tree in trees if tree.species.strip()]
     if not labelled:
         return {}
     counts = Counter(labelled)
@@ -296,6 +306,8 @@ def diameter_distribution(trees: Sequence[Tree], *, class_width: float = 5.0) ->
             stem in it, and a shade narrower it raised
             ``decimal.InvalidOperation`` from inside the library.
     """
+    if not math.isfinite(class_width):
+        raise MetricsError(f"class_width must be finite, got {class_width!r}")
     if class_width < MIN_CLASS_WIDTH_CM:
         raise MetricsError(
             f"class_width must be at least {MIN_CLASS_WIDTH_CM} cm, got {class_width!r}"
@@ -333,6 +345,14 @@ def above_ground_biomass(tree: Tree, *, wood_density: float | None = None) -> fl
         return None
     if wood_density is None:
         wood_density = WOOD_DENSITY.get(tree.species.strip().upper(), DEFAULT_WOOD_DENSITY)
+    if not math.isfinite(wood_density) or wood_density <= 0:
+        # A density is a physical quantity: non-positive or non-finite is a
+        # caller error, not a missing measurement.  Letting it reach the
+        # evaluation below surfaced as a complex-number TypeError from the
+        # mantissa split, which says nothing about what was wrong.
+        raise MetricsError(
+            f"wood_density must be a positive finite number, got {wood_density!r}"
+        )
     # ``0.0673 * (rho * D^2 * H) ** 0.976``, evaluated so that neither end of
     # the range is lost.  Forming the bracket directly overflows above about
     # 1.3e154 cm of diameter; distributing the exponent as
@@ -416,7 +436,7 @@ class StandMetrics:
         stand has an unknown stocking, and a zero would be indistinguishable
         from a stand that was counted and found empty.
         """
-        if area_ha <= 0:
+        if not math.isfinite(area_ha) or area_ha <= 0:
             raise MetricsError("area_ha must be positive")
         return cls(
             area_ha=area_ha,
@@ -460,7 +480,7 @@ def stand_metrics(
     Raises:
         MetricsError: If ``area_ha`` is not positive.
     """
-    if area_ha <= 0:
+    if not math.isfinite(area_ha) or area_ha <= 0:
         raise MetricsError("area_ha must be positive")
     selected = [tree for tree in trees if tree.is_live] if live_only else list(trees)
     measured = _measured(selected)
@@ -497,7 +517,11 @@ def stand_metrics(
         lorey_height_m=lorey_height(selected),
         dominant_height_m=dominant_height(selected, area_ha),
         max_height_m=max(heights) if heights else None,
-        sdi=reineke_sdi(len(measured) / area_ha, qmd) if qmd else None,
+        # Reineke's index is defined over the same stem population as
+        # stems_per_ha (every selected stem), not only the measured subset:
+        # the two figures sit side by side in the report and must count the
+        # same trees.
+        sdi=reineke_sdi(stems_ha, qmd) if qmd else None,
         gini_basal_area=gini_coefficient([tree.basal_area_m2 or 0.0 for tree in measured]),
         shannon=shannon_index(selected),
         simpson=simpson_index(selected),
@@ -510,4 +534,9 @@ def stand_metrics(
 
 
 def _round(value: float | None, digits: int) -> float | None:
-    return None if value is None else round(value, digits)
+    # A non-finite summary (an overflowing volume, say) has no JSON
+    # representation; report it as unknown rather than emitting inf into a
+    # document strict parsers refuse to read back.
+    if value is None or not math.isfinite(value):
+        return None
+    return round(value, digits)

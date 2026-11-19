@@ -92,17 +92,32 @@ class Tree:
     crown_diameter_m: float | None = None
     status: str = "live"
 
+    @staticmethod
+    def _number(name: str, value: object, requirement: str) -> float:
+        """Coerce a numeric field to float, rejecting bools and non-numbers.
+
+        Construction used to validate a converted copy and keep the
+        original object, so a string coordinate survived into later
+        arithmetic as a bare TypeError and ``True`` passed as 1.0.
+        """
+        if isinstance(value, bool):
+            raise InventoryError(f"{name} must be {requirement}, got {value!r}")
+        try:
+            number = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise InventoryError(f"{name} must be {requirement}, got {value!r}") from exc
+        if not math.isfinite(number):
+            raise InventoryError(f"{name} must be {requirement}, got {value!r}")
+        return number
+
     def __post_init__(self) -> None:
         for name in ("x", "y"):
-            value = float(getattr(self, name))
-            if not math.isfinite(value):
-                raise InventoryError(f"{name} must be a finite coordinate, got {value!r}")
+            setattr(self, name, self._number(name, getattr(self, name), "a finite coordinate"))
         for name in ("dbh_cm", "height_m", "crown_diameter_m"):
             value = getattr(self, name)
             if value is None:
                 continue
-            if not math.isfinite(float(value)):
-                raise InventoryError(f"{name} must be finite when present, got {value!r}")
+            setattr(self, name, self._number(name, value, "finite when present"))
         # A stem whose basal area cannot be represented has no usable metrics at
         # all: every summary that reaches it overflows part-way through, after
         # the earlier rows have already been folded in.  Refusing the record is
@@ -192,7 +207,11 @@ def parse_trees(text: str) -> list[Tree]:
     try:
         header = next(reader)
     except StopIteration:
-        return []
+        # A file with no header at all is not an empty inventory: the empty
+        # inventory is a header with no rows under it.  Returning [] here
+        # made a missing or truncated file indistinguishable from a plot
+        # that was counted and found empty.
+        raise InventoryError("inventory CSV is empty: it has no header row") from None
     keys = [_normalise_key(name) for name in header]
     # Two headings can normalise onto one field — ``x`` and ``easting`` both
     # mean the abscissa — and folding the row into a dict kept whichever came
@@ -211,8 +230,29 @@ def parse_trees(text: str) -> list[Tree]:
         raise InventoryError(f"inventory CSV names the same field twice: {detail}")
     if "x" not in keys or "y" not in keys:
         raise InventoryError("inventory CSV must provide 'x' and 'y' columns")
+    rows = list(reader)
+    # Generated ids must never collide with an explicit id anywhere in the
+    # file — including one that appears after the blank row — so the
+    # explicit ids are collected before any id is generated.
+    id_column = keys.index("tree_id") if "tree_id" in keys else None
+    used_ids: set[str] = set()
+    if id_column is not None:
+        for row in rows:
+            if id_column < len(row) and row[id_column].strip():
+                used_ids.add(row[id_column].strip())
+    next_number = 1
+
+    def generated_id() -> str:
+        nonlocal next_number
+        while str(next_number) in used_ids:
+            next_number += 1
+        value = str(next_number)
+        used_ids.add(value)
+        next_number += 1
+        return value
+
     trees: list[Tree] = []
-    for row_number, row in enumerate(reader, start=2):
+    for row_number, row in enumerate(rows, start=2):
         if not any(cell.strip() for cell in row):
             continue
         # A row with more fields than headings has data no column claims.
@@ -225,7 +265,7 @@ def parse_trees(text: str) -> list[Tree]:
         y = _to_float(record.get("y"), field_name="y", row_number=row_number)
         if x is None or y is None:
             raise InventoryError(f"row {row_number}: missing coordinates")
-        tree_id = (record.get("tree_id") or "").strip() or str(len(trees) + 1)
+        tree_id = (record.get("tree_id") or "").strip() or generated_id()
         status = (record.get("status") or "live").strip() or "live"
         trees.append(
             Tree(
@@ -570,7 +610,7 @@ def match_trees(
     choose between them; identifiers do, because they travel with the records
     through reordering and through any rigid motion of the plot.
     """
-    if tolerance <= 0:
+    if not math.isfinite(tolerance) or tolerance <= 0:
         raise InventoryError("tolerance must be positive")
     targets = [tree for tree in reference if tree.is_live] if live_only else list(reference)
 
