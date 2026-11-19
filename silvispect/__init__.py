@@ -19,7 +19,7 @@ Typical use::
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .allometry import FittedModel, fit_height_diameter
 from .canopy import canopy_cover, canopy_height_model, find_gaps

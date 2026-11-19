@@ -4,6 +4,410 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+Sections below the newest one describe a release as it was published. Defects
+found *after* a release are recorded under the version that fixes them, never
+folded back into the version that shipped with them.
+
+## 0.1.1 — unreleased
+
+Behavioural fixes on top of the released 0.1.0. Nothing here was present in
+0.1.0; each item describes a defect that shipped in it.
+
+Numbered as a patch release: nothing is removed or renamed, and every entry is
+a correction to behaviour that was wrong. Two of them are visible in output —
+`silvispect chm` writes heights that round-trip instead of rounding to three
+decimals, and gains an optional `--precision` to round on request — but neither
+is a new capability. The rounding was the defect.
+
+Ten rounds of review after the release found these. As before, each fix
+carries a test that fails against the code as it stood — and where the defect
+violated a general property, that property is what the test asserts, over
+randomized inputs rather than the one raster that exposed it.
+
+Fourth round — a property campaign over 914 randomized stands applied
+transformations (translation, reflection, rotation, permutation) and checked
+what should be invariant under them:
+
+- **The opening function was not spatially equivariant.** Discs were skipped
+  when something had already covered their centre, but covering a centre is not
+  containment — that needs `|p - q| + r <= R`. Equal-radius discs therefore
+  dropped each other in row-major order: on a treeless 4 m x 4 m plot the four
+  equal discs collapsed to the north-west 3x3 block, so reflecting the input
+  changed the answer (199 of 1,200 comparisons), and raising `canopy_threshold`
+  — which can only admit more open ground — lost cells in 1,302 of 1,920
+  transitions. 0.1.0's monotonicity in `min_gap_width` was real, but it
+  thresholded a field whose construction was itself incomplete.
+- **Matching depended on CSV row order at equal distances.** Two crowns and two
+  stems all exactly one metre apart matched one pair in one row order and two in
+  the other, moving recall from 0.5 to 1.0 and RMSE from 1.0 m to 16.2 m on
+  identical geometry.
+- Dominant height had the same defect at the 100-stems-per-hectare cutoff: two
+  30 cm stems of 10 m and 30 m gave whichever was listed first. Ranking is now
+  diameter, then height, then identifier.
+- `silvispect chm` wrote the derived model at three decimals with no way to
+  change it, turning near-equal heights into exact plateaus and changing which
+  cells the detector called apexes — 267 of 300 randomized stands differed from
+  the same analysis run on the unrounded model.
+- Fitted allometry parameters drifted in the sixth decimal under permutation,
+  because floating-point summation order changes the optimiser's path.
+  Observations are sorted before fitting.
+
+Fifth round — a review of those repairs found that three of them had replaced
+one dependence with another, and that a fourth had made the opening function
+too slow to use:
+
+- **Matching had traded row order for map orientation.** Breaking equal-distance
+  ties on coordinates makes the answer depend on which way the plot faces:
+  rotating the same two crowns and two stems by 180 degrees moved recall from
+  0.5 to 1.0 and RMSE from 1.0 m to 16.2 m — the exact defect the tie-break was
+  meant to remove. Equal-distance candidates are now resolved together, by a
+  maximum bipartite matching over that one distance, so the number of pairs a
+  tie yields is a fact about the geometry. Nearer pairs are settled first and
+  are never given up. Checked under six isometries, including translation,
+  rotation, reflection and transposition.
+- **Edge classification ignored the requested connectivity.** `find_gaps`
+  labelled components with the caller's connectivity but always inherited edge
+  contact from eight-connected components, so under `connectivity=4` a diagonal
+  contact carried the edge flag inward: on a 3x3 raster the interior cell was
+  reported as touching the border and `include_edge_gaps=False` discarded it.
+  Both passes now use the same connectivity, and a randomized check asserts that
+  a gap is flagged as an edge gap exactly when it contains a border cell.
+- **The opening tolerance was a fixed number of metres.** Comparisons against
+  the radius field absorbed a `1e-9` slack, which is invisible on a metre-wide
+  cell and total on a nanometre-wide one: at that cell size the four equal discs
+  of a treeless 4x4 plot resolved to two different radii and the width filter
+  admitted every cell whatever width was asked for. The tolerance is now a
+  fraction of the cell size, so the field is covariant with the plot's scale —
+  checked across cell sizes from 1e-9 to 1e6.
+- **`silvispect chm` had moved the rounding boundary, not removed it.** Writing
+  six decimals instead of three still merges heights that differ below the sixth
+  into a plateau, and a plateau has no apex: heights differing at 1e-8 m again
+  gave a different tree count than the same analysis on the unrounded surface.
+  The command now writes the shortest text that reads back as the same float, so
+  the derived model *is* the model the analysis would have used, at any
+  magnitude. `--precision` still rounds on request.
+- **The corrected opening function was superlinear.** Painting every maximal
+  disc cell by cell cost 8.6 s on a treeless 384 x 384 raster, against 0.16 s
+  for the 0.1.0 code — which was fast only because it was dropping discs it
+  should have kept. Discs contained in a neighbour's are now dropped by the
+  honest test `|p - q| + d(p) <= d(q)`, which reads only the distance field and
+  so cannot depend on scan order, and the survivors settle each cell once
+  through a per-row disjoint-set walk. The same raster takes 0.59 s and the cost
+  is now linear in the number of cells. A brute-force comparison over 400
+  randomized rasters confirms the field is unchanged.
+
+Sixth round — an exhaustive campaign found that the matching repair was still
+incomplete, and turned up five defects that have been there since 0.1.0:
+
+- **Matching still let identifiers decide how many pairs it found.** Settling
+  one distance at a time and never looking further is not enough to honour the
+  documented objective. Two stems a metre either side of a crown are an
+  arbitrary choice on their own, but taking the wrong one strands a second
+  crown two metres from the left-hand stem: relabelling the two stems, with the
+  geometry untouched, moved the match count from one to two. Matching now
+  reaches the stated optimum exactly — as many pairs as possible at the
+  shortest distance, then as many as possible at the next without giving any of
+  those up — by encoding it as an integer weight per distance and solving a
+  minimum-cost assignment over each connected cluster of candidates. Checked
+  against brute-force enumeration of every possible pairing on randomized
+  geometries. Only the *count* is fixed by geometry; where the geometry is
+  symmetric several pairings are equally optimal, and identifiers still choose
+  between them, which is now stated rather than incidental.
+- **Materially misaligned rasters were combined without complaint.** The origin
+  check kept a relative tolerance, so the allowance grew with the coordinates:
+  at an easting of 1e9 two rasters half a cell apart were subtracted cell for
+  cell into a quietly wrong canopy model. Origins must now agree to within a
+  millionth of a cell, which means the same thing at every magnitude.
+- **A one-cell raster could take sixteen seconds to detect one tree.** The
+  search window grows with the height of the cell being tested, so an accepted
+  height of 1e5 m asks for a radius of 5,501 cells, and the window walked the
+  whole requested square before discarding everything outside the raster. The
+  offsets are now clipped first, so the cost is the number of cells actually
+  looked at. The cells yielded, and their order, are unchanged.
+- **A plot exactly 30 % open was reported as above a 30 % limit.** The open
+  share was taken as one minus the cover, and `1.0 - 0.7` is not `0.3`. It is
+  now counted from the open cells directly, so a rule phrased as *above* a
+  limit reads strictly, and both numbers no longer print as "30%" beside a
+  finding that says one exceeds the other.
+- **Values close to the nodata sentinel were read back as absent.** Absence was
+  matched approximately, so with a sentinel of `0` the smallest positive number
+  a raster can hold vanished on the way back in, and the band of swallowed
+  values widened with the magnitude of the sentinel. The sentinel is written
+  exactly and is now matched exactly.
+- **`chm` wrote its output and then failed describing it.** A raster holding
+  `0` and `1e200` is finite and is accepted everywhere, but squaring the
+  deviations overflowed while computing display statistics, so the command
+  reported failure over a file it had already written correctly. Statistics are
+  now scaled before squaring and summed exactly.
+- Fractional raster dimensions — `ncols 1.9` — were truncated to a smaller
+  raster instead of being rejected as malformed.
+- Lorey's mean height depended on row order for extreme inputs, because a
+  running total loses the small stems once a large one has been added. Summed
+  exactly instead.
+
+Seventh round — a review of the sixth round's repairs found eleven further
+defects, two of them serious, and one of them introduced by the sixth round
+itself:
+
+- **Detection was not the same forest seen from the other side.** A cell was
+  suppressed when any neighbour merely *reached* its height, so of two equal
+  maxima the one scanned second was deleted: `8 7 4 8` found one tree and its
+  mirror image `8 4 7 8` found none, and the stocking findings came out
+  reversed. Equal cells no longer suppress each other — a run of them is one
+  plateau, which is one treetop — and the three places where equal values still
+  have to be separated (the order crowns are seeded in, the apex chosen for a
+  plateau, and which crown claims a contested cell) now break their ties on
+  quantities that travel with the plot rather than on the row and column, which
+  reverse with it. Distances are counted in whole cells so that a reflection
+  reproduces them exactly. Over 31,500 comparisons across the eight symmetries
+  of a raster, the tree count is now identical in every one; it differed in
+  1,298 before.
+- **An empty raster was reported as an empty forest.** Detection over a raster
+  with no valid cell returns no crowns, and that was recorded as a *count* of
+  zero from "detected" data. The rules read the zero as a measurement and
+  reported an understocked stand and a canopy cover below target — two
+  confident findings about a plot nobody had looked at. "Nothing was observed"
+  is now distinct from "nothing was found": `metrics_source` reads `none`, the
+  count is `null`, and the rules that need canopy observations stay quiet.
+- **Undefined agreement ratios were reported as zero.** With no field stems
+  there is no recall and with no detections there is no precision, but 0/0 was
+  recorded as `0.0` and the rules read it as complete failure. Each ratio is
+  now `null` when its own denominator is empty, through the JSON and the
+  reports as well as the rules.
+- **Statistics still overflowed on values a raster accepts.** Three cells at
+  the largest finite float raised part-way through the sum, and a raster of
+  `-MAX` and three `MAX` produced `NaN` because the deviation was taken before
+  the scaling meant to protect it. Both now come out exactly, checked against
+  a 400-digit Decimal oracle.
+- **The neighbouring reductions had the same defect.** The smoothing filter,
+  crown and gap means, rugosity, and the diameter and volume aggregations all
+  summed before dividing or squared before scaling; the smoothing overflow made
+  default detection over two saturated cells fail converting an infinite search
+  radius to a whole number of cells. They now share overflow-safe helpers. A
+  stem whose basal area has no finite value is refused when it is read rather
+  than overflowing a summary half-way through, and the four JSON-producing
+  commands write strict JSON — a gap area that genuinely has no finite value is
+  now refused rather than printed as `Infinity` beside a successful exit.
+- **Alignment depended on which raster was asked.** *Introduced by the sixth
+  round.* The origin tolerance was a fraction of the receiver's cell, and
+  cellsizes only have to agree to a relative 1e-9, so there was a band in which
+  `a.combine(b)` refused the pair that `b.combine(a)` accepted. The tolerance
+  is now taken from both grids. It is still a fraction of a cell, so it still
+  does not grow with the coordinates.
+- **Diameter classes narrower than a centimetre collapsed.** The class lower
+  bound was truncated to a whole number, so at a width of 0.5 cm two stems a
+  whole band apart were counted together in a class labelled `0-0`. Stems are
+  binned by band number and the boundaries are computed back from it, so the
+  labels state the width they were asked for.
+- **Two headings for one field silently kept the last.** A CSV headed
+  `x,easting,y` reported the easting as the x of every stem and said nothing
+  about the column it had dropped; a raster header repeating `ncols`, or giving
+  both `xllcorner` and `xllcenter`, did the same. Ambiguous input is now
+  refused rather than resolved by scan order, and a row with more fields than
+  the header has is refused instead of truncated.
+- **SV030 and SV031 fired on the threshold they document as strict.** Both are
+  described as departing by *more than* z standard deviations, so a threshold
+  of zero reported a stem sitting exactly on the mean as an outlier. Every rule
+  in the table was re-read against its wording; these two were the only ones
+  that disagreed, and a test now provokes each remaining rule and re-runs it
+  with the limit set to the value it just judged.
+- Writing an `InspectionConfig` in Python accepted booleans and strings that a
+  parsed profile refused, so a cover threshold could be `True`. Both doors now
+  enforce the same domain, as do the detection parameters.
+- A finding could print the two numbers it compared as one — "200 stems/ha is
+  below the minimum of 200 stems/ha". Precision is added only for the pairs
+  that would otherwise round together, so ordinary findings read as before.
+
+Eighth round — a review of the seventh found twelve more defects, three of
+them serious, two of them introduced by the seventh round itself:
+
+- **An unobserved raster still spoke about a field inventory.** The seventh
+  round stopped the stocking and canopy *rules* from reading an all-nodata
+  raster as an empty forest, but detection still ran on it and its empty
+  result was still matched against the inventory — so every field stem came
+  back as missed by a sensor that had never seen anything, SV050 fired at
+  "0 of 1", and a `--fail-on warning` run failed over a plot nobody had looked
+  at. The serialized report agreed: cover, open fraction, rugosity, strata and
+  the gap count were all numeric zeros. Detection, gap mapping, matching and
+  the canopy summary now do not run at all without a valid cell, and their
+  blocks are absent rather than zero.
+- **A valid configuration could hide a critical finding.** `min_gap_area` is
+  the reporting floor and `max_gap_area` the limit SV011 enforces, and nothing
+  stopped the floor being set above the limit: at 101 m² against 50 m² a
+  100 m² opening was deleted before the rule saw it and the inspection came
+  back clean. The pair is now validated like the stocking and density pairs
+  beside it.
+- **Detection was still not reflection-equivariant, in a way the count could
+  not see.** The mean filter turns `2 3 / 4 9 / 3 2` into a surface that is its
+  own mirror image, and the tie-break was reading that surface — so the two
+  maxima it leaves were indistinguishable and the mirrored plot returned the
+  *same* crown rather than the mirrored one. Ties are now settled against the
+  raster as measured, which still tells the two apart: smoothing is allowed to
+  make two candidates equal, but not to be the thing that decides between
+  them. Over 8,085 comparisons across the eight symmetries of rasters with no
+  symmetry of their own, crown cells and apexes now transform exactly.
+- **The seventh round's Lorey-height repair overflowed.** Normalising the
+  weights alone leaves two equal weights at 1 and 1, and the heights then
+  reach the finite limit in the sum instead: two stems of the largest finite
+  height have exactly that height as their weighted mean, and asking for it
+  raised. Both sides are normalised now.
+- **`chm` could write a raster its own reader refuses.** A surface at the
+  largest finite float over a terrain at its negative has a height no float
+  can hold; the subtraction returned infinity, the file was written with `inf`
+  in it, the command reported success, and the model would not parse. The
+  subtraction is checked before anything is written.
+- **Gap width was measured centre to centre, not as a circle inside the gap.**
+  Half of the step from an open cell to the canopy cell beside it lies inside
+  that tree, so it is not clearance: a one-metre square opening reported a
+  two-metre width and survived a 1.5 m minimum it should have failed. The
+  distance field now measures to the canopy boundary, as it already did to the
+  plot edge. **Reported widths drop by one cell** and `min_gap_width` now
+  demands the clearance it names — on the sample plot the three gaps go from
+  12.3/5.8/5.8 m to 11.8/5.3/5.3 m, and their areas shrink with them.
+- **Decimal class boundaries still misclassified stems.** Binary floats put
+  0.3 / 0.1 a hair below three, so a stem sitting exactly on a class boundary
+  fell into the band below and took a label like `0.2-0.30000000000000004`
+  with it. Band numbers and boundaries are worked out in decimal, which is how
+  the widths and the diameters were written.
+- **A curve the fitter returns could not be read backwards.** Least squares
+  will return a decreasing power model for decreasing data, and inversion
+  assumed the curve rose — so every inversion of a height that curve actually
+  attains came back as `null`. Which way the curve runs is read off its own
+  endpoints now.
+- A whole-valued float count — `smooth_radius=1.0` — passed validation as a
+  whole number of cells and then raised a `TypeError` from inside detection.
+  It is stored as the integer it is.
+- Crown membership depended on the vertical unit: the allowance for a cell
+  that rises by a hair on the way down from an apex was a fixed 1e-9 m, so
+  measuring the same forest in decimetres moved a four-cell crown to three. It
+  is relative now.
+- Above-ground biomass overflowed on diameters the inventory accepts, because
+  `(rho D² H)^0.976` squared the diameter before applying the exponent that
+  brings the result back into range. The exponent is distributed.
+- `docs/concepts.md` still described the plateau apex as "the first in
+  row-major order", which the seventh round replaced.
+
+Ninth round — a release-candidate review found eight more defects, two of them
+serious, three of them introduced by the eighth round:
+
+- **Coverage was judged plot-wide, not cell by cell.** The eighth round taught
+  the inspection to recognise a raster with *no* valid cell, but a partly
+  covered plot went on being judged as though it were fully covered: a stem
+  standing in a nodata hole counted as a detector omission, halving recall and
+  raising SV050 about a sensor that had never looked there. Eligibility for the
+  detection-agreement rules now follows each stem's own cell.
+- **Detection was still not equivariant, and the count could not see it.**
+  *Introduced by the eighth round.* Ranking tied candidates by the sorted list
+  of (distance, height) pairs seen from each cell separates almost every pair —
+  but on `8 5 / 21 5 / 5 8 / 5 8` two candidates had identical lists without
+  any symmetry relating them, so the fallback to row and column order decided
+  and reversed with the plot, growing a four-cell crown where the original grew
+  three. The raster is put in a **canonical orientation** instead: each of the
+  eight symmetries is applied, the smallest readout wins, and a cell is ranked
+  by where it lands in it. Two cells tie there exactly when a symmetry of the
+  raster maps one onto the other, which is the one case where nothing could
+  have chosen. Across 16,800 comparisons over rasters with no symmetry of their
+  own — unsmoothed and smoothed — apexes, crown cells and crown sizes now all
+  transform exactly, where four cell mismatches remained before.
+- **Diagonal canopy boundaries still overstated gap width.** Taking a flat half
+  cell off the walk is right straight across and wrong on the diagonal, where
+  the nearest point of the cell is its *corner*: a plus-shaped opening claimed
+  1.83 m of clearance where 1.41 m is the largest circle that fits, and
+  survived a 1.6 m minimum. The walk now starts at the boundary — every open
+  cell touching canopy is seeded with its own true distance — instead of being
+  shifted afterwards. **Reported widths tighten again**: on the sample plot the
+  three gaps go from 11.8/5.3/5.3 m to 11.6/5.1/5.1 m.
+- **Lorey's height had been repaired from an overflow into an underflow.**
+  *Introduced by the eighth round.* Scaling both sides by their largest value
+  sends a subnormal basal area, or a 1e-308 height beside the largest float, to
+  zero — so a pair whose weighted mean is 1e-308 came back as 0. The exponents
+  are carried as integers now, so neither end of the range can be lost.
+- **The biomass equation had the same trade.** *Introduced by the eighth
+  round.* Distributing the exponent stopped the diameter overflowing and made
+  `rho * H` underflow instead: a height of 5e-324 m took the whole biomass to
+  zero, for a result an ordinary float holds. The bracket is carried as a
+  mantissa and a power of two, which loses neither end. Both are checked
+  against a high-precision Decimal oracle across the accepted range.
+- **`chm` could still write a raster its own reader refuses.** The subtraction
+  was checked; the clamp applied to its result was not, so a `floor` of `inf`
+  replaced every height with infinity after the check had passed. Non-finite
+  clamp bounds are refused, and — closing the family rather than the case —
+  `Grid.from_rows` and `Grid.filled` now refuse non-finite cells too, which
+  `Grid.parse` always did. A cell with no measurement is `None`.
+- Diameter classes narrower than the inventory's own record could not be
+  computed: at 3e-28 cm the decimal division ran out of digits and emitted a
+  class whose interval excluded the stem in it, and a shade narrower
+  `decimal.InvalidOperation` escaped. `class_width` is refused below **0.001
+  cm** — a hundredth of a millimetre, finer than the three decimals an
+  inventory is written to — and the arithmetic is sized from that floor.
+- Inversion refused the ends of its own range: `invert(predict(lower),
+  lower=lower)` returned `None`, though the documentation says `None` means the
+  height lies outside the range. Both endpoints are inside it.
+
+Default inventory CSV serialisation was examined and **left unchanged**. It
+rounds to three decimals, so a stem four ten-thousandths outside a match
+tolerance is inside it after a round trip. That is the intended contract rather
+than a defect: `precision` is a documented parameter, an inventory is a record
+of measurements rather than an intermediate to be re-analysed, and a millimetre
+is finer than any field instrument reports. `docs/data-formats.md` now says so
+outright, and a test pins it.
+
+Tenth round — a closing review found five defects, two of them one defect seen
+twice:
+
+- **Gap width was still not the width of the widest circle that fits.** Two
+  approximations were left in the measurement, and neither shrinks with
+  resolution. Circle centres were taken only at cell centres, so a block of
+  four open 1 m cells — a square two metres across — reported a width of 1.0 m
+  and was rejected by a 1.5 m minimum, though the circle filling it is centred
+  on the lattice corner where the four cells meet, as far from every cell
+  centre as a point can be. And distances were propagated by a chamfer walk,
+  one cell straight and `sqrt(2)` diagonally, which measures a knight's move as
+  `1 + sqrt(2)` where the crow flies `sqrt(5)`: a 3x3 opening with one cell
+  added on each side claimed 3.41 m and survived a 3.3 m minimum where
+  `sqrt(10)` = 3.16 m is the largest circle that fits.
+
+  Both are gone, not corrected. The geometry is now taken as what it is — the
+  union of the open cells' squares, bounded by the canopy cells and the plot
+  edge. Distances to it are an exact separable Euclidean transform, and the
+  circles are found in closed form: a circle inside a rectilinear region is
+  held by the walls it touches, so every way of holding one is a small solve
+  over wall lines and reflex corners. The largest is one of them, and the
+  opening function needs one family more — a circle held by two walls *and*
+  the cell it must cover, which sits at no local maximum and so appears in no
+  enumeration of pinned circles. Each solve is done in offsets from the cell
+  it concerns, so the answer is bit-identical however the raster is turned.
+
+  **Reported widths change on the sample plot**, in both directions, and the
+  gap count with them. The raw sub-canopy components measure 11.63/5.15/4.10 m
+  where they measured 11.61/5.12/3.74 m; after the 5 m opening two gaps remain
+  at 155.5 m2 / 11.63 m and 26.5 m2 / 5.27 m, where three were reported at
+  159.5/11.61, 44.5/5.12 and 27.0/5.12. The 44.5 m2 gap was the width error
+  itself: measured exactly, the part of it that admits a 5 m circle is 21.2 m2
+  and falls below the 25 m2 minimum area, and it is listed again by
+  `--min-area 0`. The demo stand maps 12 gaps where it mapped 10. Exactness
+  costs time: mapping the sample plot's gaps takes 0.25 s where it took
+  0.09 s, and the synthetic stand 1.1 s where it took 0.4 s.
+- **Lorey's height still underflowed, one layer further down.** The ninth round
+  carried the exponents of the weighted sum, but the weight itself was formed
+  as an ordinary float: a basal area of `pi (d/200)^2` for a diameter of
+  2e-160 cm is zero before any exponent can be carried, so a stand of that stem
+  beside an ordinary one returned 0.0 for a mean the arithmetic can hold. The
+  weight is now built as a mantissa and a power of two from the diameter's own,
+  which squares an exponent instead of a number, and neither end of the float
+  range is lost.
+- **A grid could be built with geometry its own reader refuses.** `Grid.parse`
+  has always rejected a header it cannot read back, but the other constructors
+  checked only the cells: `canopy_height_model` on a grid whose `cellsize` was
+  infinite returned a grid that could be written and never re-read. Every
+  header field — the cell size, both origin coordinates and the nodata
+  sentinel — must now be finite, and the row and column counts whole, in all
+  four constructors alike.
+- The documentation still described the superseded tie-break for tied
+  detection candidates, alongside the canonical orientation that replaced it.
+  The current rule is stated once, and the two earlier ones are kept as
+  labelled history.
+
 ## 0.1.0 — 2026-08-17
 
 First release. Everything below is new.

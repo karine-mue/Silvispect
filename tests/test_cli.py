@@ -254,3 +254,119 @@ def test_malformed_inventory_is_reported(tmp_path):
     broken.write_text("tree_id,dbh_cm\nA,30\n", encoding="utf-8")
     code, _ = run("metrics", broken, "--area-ha", 1.0)
     assert code == EXIT_ERROR
+
+
+HEADER = "ncols 6\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n"
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "20.0004 20.00049 19 18 17 21",  # sub-millimetre
+        "20.0000004 20.00000049 19 18 17 21",  # sub-micrometre
+        "20.000000000004 20.0000000000049 19 18 17 21",  # sub-picometre
+        "3020.4 3020.49 3019 3018 3017 3021",  # a kilometre above the datum
+    ],
+)
+def test_chm_command_writes_the_model_the_analysis_would_have_used(tmp_path, surface):
+    """A derived model must analyse as the model it was derived from.
+
+    Writing a fixed number of decimals merges heights that differ below the
+    last one into a plateau, and a plateau has no apex, so the detector reports
+    something different from the same analysis on the unrounded surface.
+    Raising the fixed precision does not fix that — it only moves the magnitude
+    at which it happens, which is why this is checked across four of them.  The
+    file has to round-trip instead.
+    """
+    (tmp_path / "dsm.asc").write_text(HEADER + surface + "\n", encoding="utf-8")
+    (tmp_path / "dtm.asc").write_text(HEADER + "0 0 0 0 0 0\n", encoding="utf-8")
+    derived = tmp_path / "derived.asc"
+    code, _ = run(
+        "chm", "--dsm", tmp_path / "dsm.asc", "--dtm", tmp_path / "dtm.asc", "-o", derived
+    )
+    assert code == EXIT_OK
+
+    expected = [float(text) for text in surface.split()]
+    assert Grid.read(derived).values == expected, "the derived model is not the difference"
+
+    _, direct = run("detect", tmp_path / "dsm.asc", "--smooth-radius", 0, "--json")
+    _, through = run("detect", derived, "--smooth-radius", 0, "--json")
+    assert json.loads(direct) == json.loads(through)
+
+
+def test_chm_precision_is_still_available_when_a_smaller_file_matters(tmp_path):
+    """Rounding stays on offer; it is just no longer the default."""
+    (tmp_path / "dsm.asc").write_text(HEADER + "20.0004 20.00049 19 18 17 21\n", encoding="utf-8")
+    (tmp_path / "dtm.asc").write_text(HEADER + "0 0 0 0 0 0\n", encoding="utf-8")
+    derived = tmp_path / "rounded.asc"
+    code, _ = run(
+        "chm",
+        "--dsm",
+        tmp_path / "dsm.asc",
+        "--dtm",
+        tmp_path / "dtm.asc",
+        "-o",
+        derived,
+        "--precision",
+        2,
+    )
+    assert code == EXIT_OK
+    assert Grid.read(derived).values[:2] == [20.0, 20.0]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("detect", "chm.asc", "--json"),
+        ("gaps", "chm.asc", "--json"),
+        ("metrics", "trees.csv", "--area-ha", "1.0", "--json"),
+        ("match", "trees.csv", "--chm", "chm.asc", "--json"),
+        ("allometry", "trees.csv", "--json"),
+        ("inspect", "--chm", "chm.asc", "--inventory", "trees.csv", "--format", "json"),
+    ],
+)
+def test_every_json_command_emits_strict_json(workspace, argv):
+    """``NaN`` and ``Infinity`` are Python spellings, not JSON ones.
+
+    Only the inspection report was written with the strict flag set, so any
+    other command that reached a non-finite number would have written a
+    document that ``json.loads`` accepts and a conforming reader rejects.  The
+    flag turns that into a refusal before a single byte is printed.
+    """
+    code, text = run(*[str(workspace / a) if a.endswith((".asc", ".csv")) else a for a in argv])
+    assert code in (EXIT_OK, EXIT_FINDINGS)
+    payload = json.loads(text)
+    assert json.dumps(payload, allow_nan=False)
+    assert "NaN" not in text and "Infinity" not in text
+
+
+def test_a_non_finite_number_is_refused_rather_than_written_as_json(tmp_path):
+    """``Infinity`` is a Python spelling, not a JSON one.
+
+    A gap on this raster really does have an area past the finite range, so
+    there is no number to print.  The command used to print ``Infinity``
+    anyway — a document ``json.loads`` happens to accept and a conforming
+    reader rejects — and exited as though it had succeeded.  Refusing is the
+    honest answer, and the strict flag makes it happen before a byte reaches
+    the stream.
+    """
+    raster = tmp_path / "huge.asc"
+    raster.write_text(
+        "ncols 12\nnrows 12\nxllcorner 0\nyllcorner 0\ncellsize 1e306\nNODATA_value -9999\n"
+        + "\n".join(" ".join(["0.0"] * 12) for _ in range(12))
+        + "\n"
+    )
+    code, text = run("gaps", raster, "--min-area", 0.0, "--min-width", 0.0, "--json")
+    assert code == EXIT_ERROR
+    assert text == ""
+
+    # The same raster at a sane cell size is reported as usual.
+    ordinary = tmp_path / "plain.asc"
+    ordinary.write_text(
+        "ncols 12\nnrows 12\nxllcorner 0\nyllcorner 0\ncellsize 1.0\nNODATA_value -9999\n"
+        + "\n".join(" ".join(["0.0"] * 12) for _ in range(12))
+        + "\n"
+    )
+    code, text = run("gaps", ordinary, "--min-area", 0.0, "--min-width", 0.0, "--json")
+    assert code in (EXIT_OK, EXIT_FINDINGS)
+    assert json.dumps(json.loads(text), allow_nan=False)

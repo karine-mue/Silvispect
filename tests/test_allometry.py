@@ -196,3 +196,80 @@ def test_nelder_mead_respects_the_iteration_cap():
     result = nelder_mead(lambda p: (p[0] - 5.0) ** 2, [0.0], max_iterations=2)
     assert result.iterations <= 2
     assert not result.converged
+
+
+def test_fit_is_independent_of_record_order():
+    """Least squares is permutation-invariant; the serialised fit must be too."""
+    import random
+
+    pairs = [
+        (50.7, 29.77),
+        (29.1, 24.65),
+        (36.6, 23.26),
+        (43.5, 27.43),
+        (51.7, 29.18),
+        (40.4, 28.77),
+        (32.8, 22.88),
+        (43.9, 23.24),
+    ]
+    rng = random.Random(2)
+    for family in sorted(MODELS):
+        baseline = fit_height_diameter(pairs, model=family).as_dict()
+        for _ in range(5):
+            shuffled = pairs[:]
+            rng.shuffle(shuffled)
+            assert fit_height_diameter(shuffled, model=family).as_dict() == baseline
+
+
+def test_a_curve_the_fitter_returns_can_be_read_backwards():
+    """Least squares can return a decreasing curve, and inversion must cope.
+
+    Six stems whose height halves as the diameter doubles fit a power model at
+    ``b = -1``.  Bisection assumed the curve rose, so every inversion of a
+    height the curve actually attains came back as ``None`` — a model the
+    fitter had just produced could not be used in the direction the API
+    documents.
+    """
+    pairs = [(1.0, 100.0), (2.0, 50.0), (4.0, 25.0), (8.0, 12.5), (16.0, 6.25), (32.0, 3.125)]
+    model = fit_height_diameter(pairs, model="power")
+    assert model.params[1] < 0  # the fitted curve really does fall
+
+    for dbh, height in pairs[1:-1]:
+        assert model.invert(height) == pytest.approx(dbh, rel=1e-5)
+
+    # Heights outside the curve's own range are still unanswerable.
+    assert model.invert(model.predict(0.1) * 2) is None
+    assert model.invert(model.predict(400.0) / 2) is None
+
+
+def test_inverting_a_rising_curve_is_unchanged():
+    """The ordinary direction keeps working exactly as before."""
+    pairs = [(5.0, 4.0), (10.0, 8.0), (15.0, 12.0), (20.0, 15.0), (25.0, 17.0), (30.0, 19.0)]
+    model = fit_height_diameter(pairs, model="naslund")
+    for dbh in (8.0, 16.0, 24.0):
+        assert model.invert(model.predict(dbh)) == pytest.approx(dbh, rel=1e-4)
+    assert model.invert(500.0) is None
+
+
+@pytest.mark.parametrize("family", ["naslund", "power"])
+def test_the_ends_of_the_inversion_range_are_inside_it(family):
+    """A height the curve reaches at an endpoint inverts to that endpoint.
+
+    ``None`` is documented as meaning the height lies outside the range, and
+    the height the curve has *at* ``lower`` demonstrably does not — but both
+    ends were excluded, so asking for the diameter the curve itself predicts
+    there answered "outside".
+    """
+    rising = [(5.0, 4.0), (10.0, 8.0), (15.0, 12.0), (20.0, 15.0), (25.0, 17.0), (30.0, 19.0)]
+    falling = [(1.0, 100.0), (2.0, 50.0), (4.0, 25.0), (8.0, 12.5), (16.0, 6.25), (32.0, 3.125)]
+    model = fit_height_diameter(rising if family == "naslund" else falling, model=family)
+
+    assert model.invert(model.predict(10.0), lower=10.0, upper=20.0) == pytest.approx(10.0)
+    assert model.invert(model.predict(20.0), lower=10.0, upper=20.0) == pytest.approx(20.0)
+    # Just outside is still outside, in whichever direction the curve runs.
+    assert model.invert(model.predict(9.0), lower=10.0, upper=20.0) is None
+    assert model.invert(model.predict(21.0), lower=10.0, upper=20.0) is None
+    # And the interior is unchanged.
+    assert model.invert(model.predict(15.0), lower=10.0, upper=20.0) == pytest.approx(
+        15.0, rel=1e-4
+    )

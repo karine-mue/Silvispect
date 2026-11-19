@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "silvispect"
-version = "0.1.0"
+version = "0.1.1"
 description = "Inspect forest canopy height models and field inventories, and report coded findings."
 readme = "README.md"
 requires-python = ">=3.10"
