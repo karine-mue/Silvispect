@@ -536,6 +536,12 @@ def segment_crowns(
         )
 
     label_grid = chm.like()
+    # The labels are positive integers and absence is ``None``, so the
+    # sentinel is 0 — a value no crown can own.  Inheriting the CHM's
+    # sentinel instead let a canopy model whose nodata is 1.0 collide with
+    # tree_id 1, and the writer refused the label raster outright: the
+    # detection had succeeded and its labels could not be written down.
+    label_grid.nodata_value = 0.0
     for position, label in enumerate(labels):
         if label in kept_labels:
             label_grid.values[position] = float(remap[label])

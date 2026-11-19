@@ -69,6 +69,41 @@ class SynthConfig:
     yllcorner: float = 0.0
 
     def __post_init__(self) -> None:
+        # Every magnitude check below is a comparison, and a comparison
+        # against NaN is always false: a width of NaN and a density of inf
+        # walked past checks written as ``<= 0`` and ``< 0`` and produced a
+        # configuration object no stand could be generated from.  Finiteness
+        # is therefore established first, for every float the stand is
+        # built from.
+        for name in (
+            "width",
+            "height",
+            "cellsize",
+            "stems_per_ha",
+            "dbh_log_mean",
+            "dbh_log_sigma",
+            "dbh_min",
+            "dbh_max",
+            "height_noise",
+            "crown_intercept",
+            "crown_slope",
+            "surface_noise",
+            "terrain_slope",
+            "terrain_relief",
+            "xllcorner",
+            "yllcorner",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
+        for weight in self.species_weights:
+            if not math.isfinite(weight):
+                raise ValueError(
+                    f"species_weights must be finite numbers, got {weight!r}"
+                )
+        for radius in self.gap_radius:
+            if not math.isfinite(radius):
+                raise ValueError(f"gap_radius must be finite numbers, got {radius!r}")
         if self.width <= 0 or self.height <= 0:
             raise ValueError("stand extent must be positive")
         if self.cellsize <= 0:

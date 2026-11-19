@@ -327,6 +327,10 @@ def find_gaps(
     Returns:
         Gaps sorted by descending area.
     """
+    if not math.isfinite(min_area):
+        raise GridError(f"min_area must be a finite number, got {min_area!r}")
+    if not math.isfinite(min_width):
+        raise GridError(f"min_width must be a finite number, got {min_width!r}")
     if min_area < 0:
         raise GridError("min_area must be non-negative")
     if min_width < 0:

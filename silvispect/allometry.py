@@ -182,6 +182,13 @@ class FittedModel:
         fitter had just returned could not be read backwards at all.  Which way
         the curve runs is read off its own endpoints instead.
         """
+        if not math.isfinite(height_m):
+            # A non-finite height is outside every range.  Without the
+            # check, NaN fell through it instead: every comparison against
+            # NaN is false, so the widening loop, the range test and the
+            # bisection all waved it past and the search returned the
+            # lower bound as if it were an answer.
+            return None
         widen = upper is None
         if upper is None:
             upper = 400.0

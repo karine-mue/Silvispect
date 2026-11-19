@@ -76,6 +76,11 @@ def ascii_map(
     hi = stats.maximum if maximum is None else maximum
     if lo is None or hi is None:
         return "(empty raster)"
+    if not math.isfinite(lo) or not math.isfinite(hi):
+        # NaN defeats the order check below — every comparison against it
+        # is false — and reached the ramp indexing, where it surfaced as
+        # a bare "cannot convert float NaN to integer" from inside int().
+        raise ValueError(f"minimum and maximum must be finite, got {lo!r} and {hi!r}")
     if hi < lo:
         raise ValueError(f"maximum {hi!r} is below minimum {lo!r}")
     if math.isclose(hi, lo):

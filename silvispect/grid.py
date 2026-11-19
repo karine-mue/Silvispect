@@ -572,10 +572,19 @@ class Grid:
             return ([], [])
         lo = min(values) if lo is None else lo
         hi = max(values) if hi is None else hi
-        if math.isclose(hi, lo):
-            hi = lo + 1.0
+        if not math.isfinite(lo) or not math.isfinite(hi):
+            raise GridError(
+                f"histogram bounds must be finite numbers, got lo={lo!r} and hi={hi!r}"
+            )
         if lo > hi:
             raise GridError("histogram lower bound must not exceed upper bound")
+        if hi == lo:
+            # A single repeated value still gets a range to bin into.  Only
+            # exact equality widens: judging "close enough" here used to run
+            # before the order check, so a reversed range a hair wide was
+            # silently rewritten into a different histogram instead of
+            # refused as the reversed range it is.
+            hi = lo + 1.0
         width = (hi - lo) / bins
         counts = [0] * bins
         for value in values:
@@ -725,7 +734,13 @@ class Grid:
 
         def fmt_cell(value: Value) -> str:
             if value is None:
-                return _fmt(self.nodata_value, precision)
+                # Absence is written as the sentinel exactly as the header
+                # states it, never at cell precision: rounding the sentinel
+                # with the cells turns it into a different number, which the
+                # reader then takes for a measurement — a nodata of
+                # -9999.1234 written at two decimals came back as the valid
+                # height -9999.12, and the missing cell was resurrected.
+                return _fmt(self.nodata_value, None)
             token = _fmt(value, precision)
             if float(token) == self.nodata_value:
                 # The cell holds a measurement the reader would take for

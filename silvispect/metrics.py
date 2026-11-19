@@ -345,6 +345,14 @@ def above_ground_biomass(tree: Tree, *, wood_density: float | None = None) -> fl
         return None
     if wood_density is None:
         wood_density = WOOD_DENSITY.get(tree.species.strip().upper(), DEFAULT_WOOD_DENSITY)
+    if not math.isfinite(wood_density) or wood_density <= 0:
+        # A density is a physical quantity: non-positive or non-finite is a
+        # caller error, not a missing measurement.  Letting it reach the
+        # evaluation below surfaced as a complex-number TypeError from the
+        # mantissa split, which says nothing about what was wrong.
+        raise MetricsError(
+            f"wood_density must be a positive finite number, got {wood_density!r}"
+        )
     # ``0.0673 * (rho * D^2 * H) ** 0.976``, evaluated so that neither end of
     # the range is lost.  Forming the bracket directly overflows above about
     # 1.3e154 cm of diameter; distributing the exponent as
